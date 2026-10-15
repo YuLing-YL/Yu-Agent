@@ -1,0 +1,61 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ---- uv 本地缓存（沙箱环境用工作区内缓存）----
+.uv-cache/
+
+# ---- 密钥：绝不入库 ----
+.env
+.env.local
+*.pem
+*.key
+
+# ---- 运行产物：截图 / 轨迹 / 日志 / 视频 / 模型响应缓存 ----
+runs/*
+!runs/.gitkeep
+logs/
+outputs/
+.cache/
+*.log
+
+# ---- 实验数据（大文件不入库，只保留用例定义）----
+data/*
+!data/.gitkeep
+# 长期记忆库：目录结构入库，sqlite 数据不入库
+!data/memory/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+assets/*
+!assets/.gitkeep
+
+# ---- 评测报告产物 ----
+eval/reports/*
+!eval/reports/.gitkeep
+
+# ---- macOS ----
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# ---- 编辑器 ----
+.idea/
+.vscode/
+*.swp
+
+# ---- WorkBuddy 工具私有数据 ----
+.workbuddy/

@@ -1,0 +1,79 @@
+# 默认配置。真正的实验参数请放到 config/experiments/*.yaml 里覆盖，
+# 密钥一律走环境变量（见 .env.example），不要写在这个文件里。
+
+agent:
+  max_steps: 30              # 单个任务最多多少步
+  step_timeout_s: 60         # 单步（含模型调用）超时
+  task_timeout_s: 900        # 单任务总超时
+  max_consecutive_failures: 3
+  stop_on_grounding_error: true   # 定位失败时是否直接终止（false 则交给反思重试）
+  dry_run: false             # true = 只规划不执行（安全调试）
+
+loop:
+  history_window: 8          # 塞进 prompt 的最近步数
+  include_a11y: true         # 观察时是否读取辅助功能树
+  include_screenshot: true
+  som: true                  # 是否在截图上画编号标记（Set-of-Mark）
+  som_max_marks: 80
+  verify_after_action: true  # 动作后是否校验屏幕是否变化
+  screenshot_diff_threshold: 0.002   # 变化像素占比低于此值视为「没反应」
+
+perception:
+  screenshot_format: png
+  max_image_side: 1568       # 送模型前缩放，控制 token 成本
+  a11y_max_depth: 12
+  a11y_max_elements: 400
+
+grounding:
+  max_elements_in_prompt: 80
+  text_match_threshold: 0.62  # difflib 相似度阈值
+  prefer_a11y_over_pixels: true
+  coords_mode: pixel  # pixel | normalized_1000 | normalized_1
+
+safety:
+  require_approval_for_risky: true
+  deny_shell_by_default: true       # 默认禁止 run_shell 类动作
+  forbidden_action_types: [run_shell]
+  redact_secrets_in_traces: true
+
+models:
+  # 角色 -> 模型 profile 名（profile 定义在 config/models/*.yaml）
+  planner: planner_default
+  grounder: grounder_default
+  reflector: planner_default
+
+memory:
+  enabled: true
+  store: sqlite              # sqlite | jsonl | memory(测试用)
+  sqlite_path: data/memory/yu_agent.sqlite
+  # L1 工作记忆：上下文预算控制
+  working:
+    max_recent_steps: 6      # 保留完整细节的最近步数
+    max_recent_images: 2     # 最多带几张截图（截图 token 最贵）
+    older_steps_as_text: true
+  # 检索：GUI 领域用关键词检索即可，暂不引入向量
+  retrieval:
+    top_k: 5
+    min_score: 0.3
+    filter_by_app: true      # 按当前前台 App 过滤，避免跨 App 污染
+    bm25_weight: 1.0
+  # L3 语义记忆：坐标类记录的失效规则
+  semantic:
+    expire_after_days: 30
+    invalidate_on_resolution_change: true   # 分辨率/缩放变了就作废
+    require_reverify: true                  # 复用位置前必须重新定位校验
+  # L2 程序性记忆
+  procedural:
+    min_success_streak: 2    # 同一技能连续成功几次才沉淀为模板
+    require_verification: true
+  # 离线蒸馏（任务结束后统一做，不在循环里逐步写）
+  distillation:
+    auto_after_task: false   # 默认手动/离线批量跑，避免拖慢在线循环
+    keep_failed_as_negative: true
+  # 供 eval 做记忆 on/off 对照
+  ab_test_flag: use_memory
+
+paths:
+  runs_dir: runs
+  cache_dir: .cache/vlm
+  prompts_dir: ""            # 留空 = 用包内 src/yu_agent/prompts
