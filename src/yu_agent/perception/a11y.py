@@ -141,6 +141,19 @@ _SYSTEM_PROCESSES = {
     "ControlCenter", "NotificationCenter",
 }
 
+# 需要排除的进程 pid（由 GUI 设置为本进程，避免 agent 点击自己的界面）
+_EXCLUDED_PIDS: set = set()
+
+
+def set_excluded_pids(pids) -> None:
+    """设置要排除的进程 pid（例如 Yu-Agent 自身，避免点击自己的窗口）。"""
+    _EXCLUDED_PIDS.clear()
+    for p in pids:
+        try:
+            _EXCLUDED_PIDS.add(int(p))
+        except (TypeError, ValueError):
+            pass
+
 
 def _pid_of_frontmost_app() -> Optional[int]:
     """获取当前前台应用的 pid（跳过系统进程）。"""
@@ -227,7 +240,7 @@ def get_frontmost_app_elements(max_elements: int = 120, max_depth: int = 14) -> 
     import ApplicationServices as AX
 
     pid = _pid_of_frontmost_app()
-    if pid is None:
+    if pid is None or pid in _EXCLUDED_PIDS:
         return []
     app = AX.AXUIElementCreateApplication(pid)
     out: List[UIElement] = []

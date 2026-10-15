@@ -27,7 +27,7 @@ class Action(BaseModel):
 
 # 支持的动作类型（用于 prompt 约束与校验）
 SUPPORTED_ACTIONS = {
-    "click": "在 (x, y) 左键单击",
+    "click": "在 (x, y) 左键单击；若截图有编号框，可用 mark 指定编号",
     "double_click": "在 (x, y) 双击",
     "right_click": "在 (x, y) 右键",
     "type": "在当前位置输入 text 文本",
@@ -37,7 +37,8 @@ SUPPORTED_ACTIONS = {
     "drag": "从 (x, y) 拖到 args.dx/dy",
     "wait": "等待 duration 秒",
     "skill": "调用已注册技能，skill 填技能名，args 填参数",
-    "done": "任务已完成，reason 说明结果",
+    "subtask_done": "当前子任务已完成，reason 说明；用于推进到下一个子任务",
+    "done": "整个任务已完成，reason 说明结果",
 }
 
 

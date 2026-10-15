@@ -204,4 +204,62 @@ QSplitter::handle {
     background: #313244;
     width: 2px;
 }
+
+/* ---- 悬浮控制条 ---- */
+QWidget#floatBar {
+    background-color: #1e1e2e;
+    border: 1px solid #45475a;
+    border-radius: 14px;
+}
+
+QLabel#floatDot {
+    color: #89b4fa;
+    font-size: 16px;
+}
+
+QLabel#floatDotDone {
+    color: #a6e3a1;
+    font-size: 16px;
+}
+
+QLabel#floatDotFail {
+    color: #f38ba8;
+    font-size: 16px;
+}
+
+QLabel#floatStatus {
+    color: #cdd6f4;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QLabel#floatStep {
+    color: #6c7086;
+    font-size: 12px;
+}
+
+QPushButton#floatStop {
+    background-color: #f38ba8;
+    color: #11111b;
+    border-radius: 8px;
+    padding: 7px 14px;
+    font-weight: 700;
+}
+
+QPushButton#floatStop:hover {
+    background-color: #f5a0b5;
+}
+
+QPushButton#floatGhost {
+    background-color: transparent;
+    border: 1px solid #45475a;
+    color: #a6adc8;
+    border-radius: 8px;
+    padding: 7px 12px;
+}
+
+QPushButton#floatGhost:hover {
+    border: 1px solid #89b4fa;
+    color: #89b4fa;
+}
 """

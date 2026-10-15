@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..settings import get_saved_models, get_settings, switch_model
+from .floating import FloatingBar
 from .settings_dialog import SettingsDialog
 from .theme import APP_STYLESHEET
 from .worker import AgentWorker
@@ -37,6 +38,14 @@ class MainWindow(QMainWindow):
         self._worker: Optional[AgentWorker] = None
         self._build_ui()
         self._reload_models()
+
+        # 悬浮控制条（任务运行时置顶显示，便于随时停止）
+        self.floating = FloatingBar()
+        self.floating.stop_clicked.connect(self._stop_run)
+        self.floating.show_main_clicked.connect(self._show_main)
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.timeout.connect(self._hide_floating_if_idle)
 
         # 定时刷新截图预览
         self._preview_timer = QTimer(self)
@@ -221,9 +230,7 @@ class MainWindow(QMainWindow):
 
     def _toggle_run(self) -> None:
         if self._worker and self._worker.isRunning():
-            self._worker.stop()
-            self.run_btn.setText("▶ 发送")
-            self.status.setText("正在停止…")
+            self._stop_run()
             return
 
         task = self.task_input.toPlainText().strip()
@@ -247,7 +254,31 @@ class MainWindow(QMainWindow):
         self.run_btn.setText("■ 停止")
         self.status.setText("思考中…")
 
+        # 显示悬浮控制条（置顶，切到别的应用也能随时停止）
+        self.floating.reset_for_run()
+        self.floating.show_at_default()
+
         self._worker.start()
+
+    def _stop_run(self) -> None:
+        """停止当前任务（主窗口按钮 / 悬浮条按钮共用）。"""
+        if self._worker and self._worker.isRunning():
+            self._worker.stop()
+            self.status.setText("正在停止…")
+            self.run_btn.setText("▶ 发送")
+            self.floating.update_status("正在停止…")
+        else:
+            self.run_btn.setText("▶ 发送")
+
+    def _show_main(self) -> None:
+        """从悬浮条唤回主窗口。"""
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _hide_floating_if_idle(self) -> None:
+        if not (self._worker and self._worker.isRunning()):
+            self.floating.hide()
 
     def _on_reply(self, reply_text: str) -> None:
         """AI 给用户的回复文字。"""
@@ -261,6 +292,7 @@ class MainWindow(QMainWindow):
 
         if etype == "start":
             self.log_view.appendPlainText(f"[{ts}] 🚀 开始任务：{event.get('task')}")
+            self.floating.update_status("开始执行…")
         elif etype == "plan":
             subtasks = event.get("subtasks", [])
             lines = ["📋 任务拆分："]
@@ -268,6 +300,15 @@ class MainWindow(QMainWindow):
                 lines.append(f"   {i}. {s}")
             self.subtask_label.setText("\n".join(lines))
             self.log_view.appendPlainText(f"[{ts}] 📋 拆分为 {len(subtasks)} 个子任务")
+            self.floating.update_status(f"共 {len(subtasks)} 个子任务")
+        elif etype == "subtask":
+            idx = event.get("index", 0)
+            total = event.get("total", 0)
+            name = event.get("name", "")
+            self.log_view.appendPlainText(
+                f"[{ts}] ➡️ 子任务 {idx + 1}/{total}：{name}"
+            )
+            self.floating.update_status(f"子任务 {idx + 1}/{total}：{name}")
         elif etype == "action":
             a = event.get("action")
             x, y = event.get("x"), event.get("y")
@@ -275,12 +316,18 @@ class MainWindow(QMainWindow):
             coord = f" ({x},{y})" if x is not None else ""
             self.log_view.appendPlainText(f"[{ts}] 🎯 动作：{a}{coord}" + (f" — {reason}" if reason else ""))
             self.status.setText(f"执行动作：{a}{coord}")
+            self.floating.update_status(
+                f"{a}{coord}" + (f" — {reason}" if reason else ""),
+                step=event.get("step"),
+            )
         elif etype == "result":
             self.log_view.appendPlainText(f"[{ts}]   ✓ {event.get('result')}")
         elif etype == "error":
             self.log_view.appendPlainText(f"[{ts}] ⚠️ 错误：{event.get('message')}")
+            self.floating.update_status(f"⚠️ {event.get('message')}")
         elif etype == "safety":
             self.log_view.appendPlainText(f"[{ts}] 🛡️ 安全拦截：{event.get('message')}")
+            self.floating.update_status(f"🛡️ {event.get('message')}")
 
     def _on_finished(self, state: dict) -> None:
         ts = time.strftime("%H:%M:%S")
@@ -291,12 +338,16 @@ class MainWindow(QMainWindow):
         if state.get("skipped"):
             # 纯对话，未调用 agent
             self.status.setText("💬 已回复")
+            self.floating.hide()
         elif success:
             self.log_view.appendPlainText(f"[{ts}] ✅ 任务完成（共 {steps} 步）")
             self.status.setText(f"✅ 完成：{reason}")
+            self.floating.mark_finished(True, reason)
+            self._hide_timer.start(10000)  # 成功 10 秒后自动隐藏
         else:
             self.log_view.appendPlainText(f"[{ts}] ❌ 任务结束（共 {steps} 步）：{reason}")
             self.status.setText(f"❌ {reason}")
+            self.floating.mark_finished(False, reason)
 
         self.run_btn.setText("▶ 发送")
 
@@ -320,16 +371,30 @@ class MainWindow(QMainWindow):
         if self._worker and self._worker.isRunning():
             self._worker.stop()
             self._worker.wait(2000)
+        try:
+            self.floating.close()
+        except Exception:
+            pass
         super().closeEvent(event)
+        # 悬浮条是独立顶层窗口，主窗口关闭后需手动退出应用
+        QApplication.instance().quit()
 
 
 def run_gui() -> int:
     """启动 GUI。"""
+    import os
     import sys
+
+    from ..perception.a11y import set_excluded_pids
 
     app = QApplication(sys.argv)
     app.setStyleSheet(APP_STYLESHEET)
     app.setApplicationName("Yu-Agent")
+    # 悬浮条是独立顶层窗口，主窗口关闭时手动退出
+    app.setQuitOnLastWindowClosed(False)
+
+    # 让 agent 不要把自己的窗口当成可点击元素
+    set_excluded_pids([os.getpid()])
 
     win = MainWindow()
     win.show()

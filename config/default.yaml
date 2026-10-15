@@ -6,6 +6,8 @@ agent:
   step_timeout_s: 60         # 单步（含模型调用）超时
   task_timeout_s: 900        # 单任务总超时
   max_consecutive_failures: 3
+  max_repeated_actions: 3    # 同一动作连续重复多少次判定卡住并自动停止
+  max_no_change_steps: 4     # 屏幕连续无变化多少次判定卡住并自动停止
   stop_on_grounding_error: true   # 定位失败时是否直接终止（false 则交给反思重试）
   dry_run: false             # true = 只规划不执行（安全调试）
 

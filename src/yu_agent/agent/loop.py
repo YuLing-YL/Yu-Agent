@@ -64,16 +64,25 @@ class AgentLoop:
         self.diff_threshold = self.cfg.get("screenshot_diff_threshold", 0.002)
         self.max_image_side = self.cfg.get("max_image_side", 1568)
         self.use_som = self.cfg.get("use_som", True)
+        # 防重复/防卡死：同一动作连续重复多少次判定卡住
+        self.max_repeats = self.cfg.get("max_repeated_actions", 3)
+        # 屏幕连续无变化多少次判定卡住
+        self.max_stuck = self.cfg.get("max_no_change_steps", 4)
+        self._user_stopped = False
 
     def run(self, task: str) -> AgentState:
         """执行一个任务，直到完成或达到步数上限。"""
         self.state = AgentState(task=task, running=True)
         self.memory.start_task(task)
+        self._user_stopped = False
 
         self._emit({"type": "start", "task": task})
         log.info("开始任务：%s", task)
 
         consecutive_failures = 0
+        last_signature = None
+        repeat_count = 0
+        no_change_count = 0
 
         try:
             while self.state.running and self.state.step < self.max_steps:
@@ -132,6 +141,39 @@ class AgentLoop:
                         else:
                             action.type = "wait"
 
+                    # 4.5 子任务完成：推进到下一个；全部完成则结束任务
+                    if action.type == "subtask_done":
+                        total = len(self.state.subtasks)
+                        idx = self.state.current_subtask
+                        if total == 0 or idx >= total - 1:
+                            # 没有子任务，或已是最后一个 → 整体任务完成
+                            self.state.done = True
+                            self.state.success = True
+                            self.state.reason = action.reason or "全部子任务已完成"
+                            self.state.running = False
+                            self._emit(
+                                {
+                                    "type": "result",
+                                    "step": step,
+                                    "result": f"✅ {self.state.reason}",
+                                }
+                            )
+                            break
+                        # 推进到下一个子任务
+                        self.state.current_subtask += 1
+                        self.memory.working.current_subtask = self.state.current_subtask
+                        name = self.state.subtasks[self.state.current_subtask]
+                        self._emit(
+                            {
+                                "type": "subtask",
+                                "index": self.state.current_subtask,
+                                "total": total,
+                                "name": name,
+                            }
+                        )
+                        log.info("推进到子任务 %d/%d：%s", self.state.current_subtask + 1, total, name)
+                        continue
+
                     # 5. ground + safety 检查
                     check_action_allowed(action.type)
 
@@ -177,6 +219,7 @@ class AgentLoop:
                         "finish",
                         "plan",
                         "wait",
+                        "subtask_done",
                     ):
                         time.sleep(0.3)
                         after = capture_screen()
@@ -185,6 +228,9 @@ class AgentLoop:
                         )
                         if not screen_changed:
                             result_desc += "（屏幕无变化，可能未生效）"
+                            no_change_count += 1
+                        else:
+                            no_change_count = 0
 
                     # 8. 记录记忆 + 历史
                     self.memory.add_step(
@@ -216,6 +262,37 @@ class AgentLoop:
                         self.state.running = False
                         break
 
+                    # 10. 防重复 / 防卡死检测（避免无限重复点击）
+                    sig = (
+                        action.type, action.mark, action.x, action.y,
+                        action.text, action.key,
+                    )
+                    if sig == last_signature:
+                        repeat_count += 1
+                    else:
+                        last_signature = sig
+                        repeat_count = 1
+
+                    if repeat_count >= self.max_repeats:
+                        self.state.reason = (
+                            f"检测到连续 {repeat_count} 次完全相同的动作（{action.type}），"
+                            f"已自动停止以免无限重复。若任务其实已完成，可忽略此提示。"
+                        )
+                        self._emit(
+                            {"type": "error", "step": step, "message": self.state.reason}
+                        )
+                        break
+
+                    if self.verify_after_action and no_change_count >= self.max_stuck:
+                        self.state.reason = (
+                            f"屏幕连续 {no_change_count} 次无变化，界面可能已无响应或任务已完成，"
+                            f"已自动停止。"
+                        )
+                        self._emit(
+                            {"type": "error", "step": step, "message": self.state.reason}
+                        )
+                        break
+
                     consecutive_failures = 0  # 成功执行，重置失败计数
 
                 except SafetyViolation as e:
@@ -244,6 +321,9 @@ class AgentLoop:
 
         finally:
             self.state.running = False
+            # 用户主动停止且未成功完成时，给出明确原因
+            if self._user_stopped and not self.state.success:
+                self.state.reason = self.state.reason or "任务已被用户停止"
             # 蒸馏长期记忆
             self.memory.finish_task(task, self.state.history, self.state.success)
             self._emit(
@@ -277,7 +357,8 @@ class AgentLoop:
             )
 
     def stop(self) -> None:
-        """外部请求停止。"""
+        """外部请求停止（用户点击停止 / 关闭窗口）。"""
+        self._user_stopped = True
         self.state.running = False
 
     def _emit(self, event: Dict[str, Any]) -> None:
