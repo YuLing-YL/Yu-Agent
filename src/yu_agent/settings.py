@@ -36,10 +36,16 @@ class ModelConfig(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    max_steps: int = 30
+    max_steps: int = 20
     step_timeout_s: int = 60
     task_timeout_s: int = 900
     max_consecutive_failures: int = 3
+    # ── 防重复 / 防卡死（避免「一直点停不下来」）──
+    max_repeated_actions: int = 3  # 连续多少次完全相同的动作判定卡住
+    max_same_action_total: int = 3  # 同一目标累计点击多少次判定卡住
+    max_same_action_total_other: int = 8  # 同一按键/滚动/输入类动作累计上限
+    max_total_clicks: int = 12  # 单个任务的点击总预算
+    max_no_change_steps: int = 3  # 屏幕连续无变化多少次判定卡住
     stop_on_grounding_error: bool = True
     dry_run: bool = False
 

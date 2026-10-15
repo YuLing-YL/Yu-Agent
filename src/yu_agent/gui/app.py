@@ -47,10 +47,23 @@ class MainWindow(QMainWindow):
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self._hide_floating_if_idle)
 
+        # 关闭窗口时：若线程还在收尾，最多等一会儿，超时则强制退出
+        self._quitting = False
+        self._hidden_for_run = False
+        self._quit_watchdog = QTimer(self)
+        self._quit_watchdog.setSingleShot(True)
+        self._quit_watchdog.timeout.connect(self._force_quit)
+
         # 定时刷新截图预览
         self._preview_timer = QTimer(self)
         self._preview_timer.timeout.connect(self._refresh_preview)
         self._preview_timer.start(1500)
+
+    def _force_quit(self) -> None:
+        """兜底：线程迟迟不结束也要让程序退得掉。"""
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     # ---- UI 构建 ----
     def _build_ui(self) -> None:
@@ -258,15 +271,20 @@ class MainWindow(QMainWindow):
         self.floating.reset_for_run()
         self.floating.show_at_default()
 
+        # 让开屏幕：主窗口隐藏，避免 ①挡住目标应用 ②成为前台应用导致
+        # 感知模块把 Yu-Agent 自己排除掉、只剩程序坞图标可选（曾经就因此先点了屏幕右下角）
+        self._hidden_for_run = True
+        self.hide()
+
         self._worker.start()
 
     def _stop_run(self) -> None:
         """停止当前任务（主窗口按钮 / 悬浮条按钮共用）。"""
         if self._worker and self._worker.isRunning():
             self._worker.stop()
-            self.status.setText("正在停止…")
+            self.status.setText("正在停止…（会立刻停下，不再执行任何点击）")
             self.run_btn.setText("▶ 发送")
-            self.floating.update_status("正在停止…")
+            self.floating.update_status("正在停止…（当前这一步跑完即停）")
         else:
             self.run_btn.setText("▶ 发送")
 
@@ -293,6 +311,14 @@ class MainWindow(QMainWindow):
         if etype == "start":
             self.log_view.appendPlainText(f"[{ts}] 🚀 开始任务：{event.get('task')}")
             self.floating.update_status("开始执行…")
+            try:
+                from ..common.logging import log_file_path
+
+                p = log_file_path()
+                if p:
+                    self.log_view.appendPlainText(f"[{ts}] 📄 日志文件：{p}")
+            except Exception:
+                pass
         elif etype == "plan":
             subtasks = event.get("subtasks", [])
             lines = ["📋 任务拆分："]
@@ -322,6 +348,14 @@ class MainWindow(QMainWindow):
             )
         elif etype == "result":
             self.log_view.appendPlainText(f"[{ts}]   ✓ {event.get('result')}")
+        elif etype == "debug":
+            # 感知诊断信息（识别到多少可点元素）
+            self.log_view.appendPlainText(f"[{ts}] 🔍 {event.get('message')}")
+        elif etype == "notice":
+            # 系统自动停止（防重复/防卡死）
+            self.log_view.appendPlainText(f"[{ts}] 🛑 自动停止：{event.get('message')}")
+            self.status.setText(f"🛑 {event.get('message')}")
+            self.floating.update_status(f"🛑 自动停止")
         elif etype == "error":
             self.log_view.appendPlainText(f"[{ts}] ⚠️ 错误：{event.get('message')}")
             self.floating.update_status(f"⚠️ {event.get('message')}")
@@ -334,14 +368,16 @@ class MainWindow(QMainWindow):
         success = state.get("success", False)
         steps = state.get("steps", 0)
         reason = state.get("reason", "")
+        auto_stopped = state.get("auto_stopped", False)
 
         if state.get("skipped"):
             # 纯对话，未调用 agent
             self.status.setText("💬 已回复")
             self.floating.hide()
         elif success:
-            self.log_view.appendPlainText(f"[{ts}] ✅ 任务完成（共 {steps} 步）")
-            self.status.setText(f"✅ 完成：{reason}")
+            tag = "✅ 已自动停止" if auto_stopped else "✅ 任务完成"
+            self.log_view.appendPlainText(f"[{ts}] {tag}（共 {steps} 步）")
+            self.status.setText(f"{tag}：{reason}")
             self.floating.mark_finished(True, reason)
             self._hide_timer.start(10000)  # 成功 10 秒后自动隐藏
         else:
@@ -351,8 +387,17 @@ class MainWindow(QMainWindow):
 
         self.run_btn.setText("▶ 发送")
 
+        # 任务结束，把让开的主窗口收回来
+        if getattr(self, "_hidden_for_run", False) and not self._quitting:
+            self._hidden_for_run = False
+            self.show()
+            self.raise_()
+            self.activateWindow()
+
     def _refresh_preview(self) -> None:
         """周期性刷新屏幕预览（只在运行中显示）。"""
+        if self._quitting:
+            return
         if not (self._worker and self._worker.isRunning()):
             return
         try:
@@ -368,16 +413,44 @@ class MainWindow(QMainWindow):
             self.preview_status.setText(f"预览失败：{e}")
 
     def closeEvent(self, event) -> None:
-        if self._worker and self._worker.isRunning():
+        running = bool(self._worker and self._worker.isRunning())
+
+        if running and not self._quitting:
+            # 后台还有任务在跑：先请求停止，窗口立刻隐藏（用户马上感觉关掉了），
+            # 等线程真正收尾后再退出；最多兜底 15 秒，保证一定退得掉。
+            self._quitting = True
             self._worker.stop()
-            self._worker.wait(2000)
+            try:
+                self._worker.finished.connect(self._force_quit)
+            except Exception:
+                pass
+            self._quit_watchdog.start(15000)
+            self.hide()
+            try:
+                self.floating.hide()
+            except Exception:
+                pass
+            event.ignore()
+            return
+
+        if self._quitting:
+            # 已在收尾阶段，忽略重复关闭，等线程结束自动退出
+            try:
+                self.floating.hide()
+            except Exception:
+                pass
+            event.ignore()
+            return
+
         try:
             self.floating.close()
         except Exception:
             pass
         super().closeEvent(event)
         # 悬浮条是独立顶层窗口，主窗口关闭后需手动退出应用
-        QApplication.instance().quit()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
 
 def run_gui() -> int:

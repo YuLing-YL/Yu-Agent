@@ -2,12 +2,16 @@
 # 密钥一律走环境变量（见 .env.example），不要写在这个文件里。
 
 agent:
-  max_steps: 30              # 单个任务最多多少步
+  max_steps: 20              # 单个任务最多多少步
   step_timeout_s: 60         # 单步（含模型调用）超时
   task_timeout_s: 900        # 单任务总超时
   max_consecutive_failures: 3
-  max_repeated_actions: 3    # 同一动作连续重复多少次判定卡住并自动停止
-  max_no_change_steps: 4     # 屏幕连续无变化多少次判定卡住并自动停止
+  # ── 防重复 / 防卡死（避免「一直点击停不下来」）──
+  max_repeated_actions: 3      # 连续多少次完全相同的动作判定卡住并自动停止
+  max_same_action_total: 3     # 同一个目标（位置）累计被点击多少次判定卡住
+  max_same_action_total_other: 8   # 同一按键/滚动等动作累计上限（合法连续操作放宽）
+  max_total_clicks: 12         # 单个任务点击总预算，超过即自动停止
+  max_no_change_steps: 3       # 屏幕连续无变化多少次判定卡住并自动停止
   stop_on_grounding_error: true   # 定位失败时是否直接终止（false 则交给反思重试）
   dry_run: false             # true = 只规划不执行（安全调试）
 
@@ -16,8 +20,11 @@ loop:
   include_a11y: true         # 观察时是否读取辅助功能树
   include_screenshot: true
   som: true                  # 是否在截图上画编号标记（Set-of-Mark）
-  som_max_marks: 80
+  som_max_marks: 120         # 最多标记多少个元素（总数上限）
+  som_dock_max_marks: 30     # 程序坞最多标记几个图标（图标多时不会只标一半）
+  som_max_apps: 6            # 最多枚举几个可见应用（按前后顺序，前台应用优先）
   verify_after_action: true  # 动作后是否校验屏幕是否变化
+  verify_delay_s: 0.5        # 动作后等待多久再截图对比（太快会把慢渲染误判为无变化）
   screenshot_diff_threshold: 0.002   # 变化像素占比低于此值视为「没反应」
 
 perception:

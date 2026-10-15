@@ -18,6 +18,8 @@ class Planner:
     def __init__(self, backend, skill_registry: Optional[SkillRegistry] = None):
         self.backend = backend
         self.skill_registry = skill_registry
+        # 最近一次模型的原始输出（供排障日志使用）
+        self.last_raw_text: str = ""
 
     def plan(
         self,
@@ -28,10 +30,12 @@ class Planner:
         screen_size: tuple = (0, 0),
         marks: Optional[Dict[int, Any]] = None,
         marks_desc: str = "",
+        extra_hint: str = "",
     ) -> Action:
         """根据当前状态生成下一步动作。
 
         marks: 编号 -> 元素映射（SOM 标记），非空时引导模型输出编号而非像素坐标。
+        extra_hint: 运行期进度提示（最近动作 / 重复警告），放在提示词末尾以强化约束。
         """
         system = render_prompt(
             "system",
@@ -45,14 +49,24 @@ class Planner:
         )
 
         if marks:
-            # SOM 模式：截图上有编号框，让模型优先输出编号
+            # SOM 模式：截图上有编号框，**必须**用编号，避免模型自己估坐标估错
+            dock_note = ""
+            if any(getattr(el, "role", "") == "程序坞图标" for el in marks.values()):
+                dock_note = (
+                    "\n注意：编号表里带「程序坞图标」的是屏幕最底部程序坞里的应用图标，"
+                    "**只在你需要打开某个应用时**才点它。"
+                    "如果目标应用已经打开并在屏幕上，绝对不要再点程序坞图标。"
+                )
             prompt_parts.append(
-                f"重要：截图上的可点击元素已用红色框标出，并在左上角标注了编号。"
-                f"请直接点击对应的编号，输出格式："
+                f"重要：截图上的可点击元素已用红色框标出，并在框的左上角标注了编号。\n"
+                f"**只要你要点的目标在下面的编号表里，就必须用编号，禁止用像素坐标**——"
+                f"你自己估算的坐标一定不准。输出格式："
                 f'{{"type": "click", "mark": 编号, "reason": "..."}}。\n'
                 f"元素编号对照表：\n{marks_desc}\n"
-                f"如果你要点的目标不在编号列表里（例如需要先打开某个应用、或点击空白处），"
-                f"再使用像素坐标 x/y（范围 0~{screen_size[0] - 1} 横向、0~{screen_size[1] - 1} 纵向）。"
+                f"只有当目标**确实不在编号表里**（例如点击空白处、拖动滚动条）时，"
+                f"才退而使用像素坐标 x/y（范围 0~{screen_size[0] - 1} 横向、"
+                f"0~{screen_size[1] - 1} 纵向）。"
+                + dock_note
             )
         else:
             prompt_parts.append(
@@ -68,6 +82,9 @@ class Planner:
         if working_context:
             prompt_parts.append(working_context)
         prompt_parts.append(f"用户任务：{task}")
+        if extra_hint:
+            # 放在任务之后、收尾指令之前，让模型最后看到「别重复」的强约束
+            prompt_parts.append(extra_hint)
         prompt_parts.append("请观察当前屏幕截图，输出下一步动作的 JSON。")
 
         prompt = "\n\n".join(prompt_parts)
@@ -82,6 +99,7 @@ class Planner:
         )
 
         resp = self.backend.chat(req)
+        self.last_raw_text = resp.text or ""
         if not resp.text:
             raise ModelError("模型返回了空内容")
 

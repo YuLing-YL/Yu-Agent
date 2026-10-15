@@ -59,8 +59,7 @@ class AgentWorker(QThread):
                 )
                 return
 
-            # 3. 需要操作屏幕 → 启动 agent
-            self.event.emit({"type": "start", "task": self.task})
+            # 3. 需要操作屏幕 → 启动 agent（start 事件由主循环自己发出，这里不重复）
             state = self._agent.run(self.task)
             out = state.to_dict()
             out["reply"] = reply_text
