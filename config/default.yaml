@@ -12,6 +12,7 @@ agent:
   max_same_action_total_other: 8   # 同一按键/滚动等动作累计上限（合法连续操作放宽）
   max_total_clicks: 12         # 单个任务点击总预算，超过即自动停止
   max_no_change_steps: 3       # 屏幕连续无变化多少次判定卡住并自动停止
+  max_plan_rejects: 2          # 反复「拆分子任务」却不执行任何操作多少次判定死循环并停止
   stop_on_grounding_error: true   # 定位失败时是否直接终止（false 则交给反思重试）
   dry_run: false             # true = 只规划不执行（安全调试）
 

@@ -130,4 +130,57 @@ print(f"  reason: {st6.reason}")
 assert len(_EXECUTED) == 1, f"停止后不应再有动作被执行，实际执行了 {len(_EXECUTED)} 次"
 assert "停止" in st6.reason
 
+# ── 场景 7：模型每轮都返回 plan（无限拆分）→ 忽略重复拆分并在阈值内停止 ──
+# 曾经的 bug：plan 分支直接 continue，完全不进防重复计数，于是无限循环
+# 「拆分 → 观察 → 拆分 → 观察」，用户只能手动停止。
+seq7 = ['{"type": "plan", "subtasks": ["打开浏览器", "搜索天气"], "reason": "拆分"}'] * 30
+ev7 = []
+lp7 = AgentLoop(Backend(seq7), make_memory(), build_default_registry(),
+                config={"max_steps": 30, "verify_after_action": False,
+                        "max_plan_rejects": 2},
+                dry_run=True, callback=lambda e: ev7.append(e))
+st7 = lp7.run("帮我打开浏览器然后搜索今天天气")
+print(f"\n场景7(无限拆分): steps={st7.step} success={st7.success} auto={st7.auto_stopped}")
+print(f"  reason: {st7.reason}")
+assert st7.step == 3, f"首次拆分 + 2 次重复拆分被拒后就该停，实际 {st7.step} 步"
+assert st7.auto_stopped and not st7.success
+assert "拆" in st7.reason
+# 计划只会被接受一次，且子任务列表是第一次那份
+assert st7.subtasks == ["打开浏览器", "搜索天气"], f"子任务被反复覆盖：{st7.subtasks}"
+assert len([e for e in ev7 if e.get("type") == "plan"]) == 1, "plan 事件应只出现一次"
+
+# ── 场景 8：拆分一次后正常执行（execution 阶段不应被拆分逻辑干扰）──
+seq8 = [
+    '{"type": "plan", "subtasks": ["打开浏览器", "搜索天气"]}',
+    '{"type": "click", "mark": 3, "reason": "点浏览器"}',
+    '{"type": "type", "text": "今天天气", "reason": "输入关键词"}',
+    '{"type": "subtask_done", "reason": "已打开浏览器"}',
+    '{"type": "done", "reason": "全部完成"}',
+]
+lp8 = AgentLoop(Backend(seq8), make_memory(), build_default_registry(),
+                config={"max_steps": 20, "verify_after_action": False},
+                dry_run=True)
+st8 = lp8.run("打开浏览器搜索天气")
+print(f"\n场景8(拆分后正常执行): steps={st8.step} success={st8.success} auto={st8.auto_stopped}")
+assert st8.success and not st8.auto_stopped
+assert st8.step == 5, f"应为 5 步，实际 {st8.step}"
+
+# ── 场景 9：中间偶发一次 plan（有实际操作推进）→ 只忽略，不该误停 ──
+seq9 = [
+    '{"type": "plan", "subtasks": ["打开浏览器", "搜索天气"]}',
+    '{"type": "click", "mark": 1, "reason": "点浏览器"}',
+    '{"type": "plan", "subtasks": ["打开浏览器", "搜索天气"]}',  # 偶发重复拆分
+    '{"type": "click", "mark": 2, "reason": "点搜索框"}',
+    '{"type": "subtask_done", "reason": "已打开浏览器"}',
+    '{"type": "done", "reason": "全部完成"}',
+]
+lp9 = AgentLoop(Backend(seq9), make_memory(), build_default_registry(),
+                config={"max_steps": 20, "verify_after_action": False,
+                        "max_plan_rejects": 2},
+                dry_run=True)
+st9 = lp9.run("打开浏览器搜索天气")
+print(f"\n场景9(偶发重复拆分): steps={st9.step} success={st9.success} auto={st9.auto_stopped}")
+assert st9.success and not st9.auto_stopped, f"不该误停：{st9.reason}"
+assert st9.step == 6, f"应为 6 步，实际 {st9.step}"
+
 print("\nALL PASS")

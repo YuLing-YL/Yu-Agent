@@ -74,6 +74,7 @@ class YuAgent:
                 "max_same_action_total_other": settings.agent.max_same_action_total_other,
                 "max_total_clicks": settings.agent.max_total_clicks,
                 "max_no_change_steps": settings.agent.max_no_change_steps,
+                "max_plan_rejects": settings.agent.max_plan_rejects,
             },
             dry_run=dry_run,
             callback=callback,

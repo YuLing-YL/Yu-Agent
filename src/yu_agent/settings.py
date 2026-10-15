@@ -46,6 +46,7 @@ class AgentConfig(BaseModel):
     max_same_action_total_other: int = 8  # 同一按键/滚动/输入类动作累计上限
     max_total_clicks: int = 12  # 单个任务的点击总预算
     max_no_change_steps: int = 3  # 屏幕连续无变化多少次判定卡住
+    max_plan_rejects: int = 2  # 重复拆分子任务多少次判定死循环并停止
     stop_on_grounding_error: bool = True
     dry_run: bool = False
 

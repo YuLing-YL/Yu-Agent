@@ -12,6 +12,7 @@
   4. 整个任务点击总预算（max_total_clicks）
   5. 屏幕连续无变化上限（max_no_change_steps）
   6. 单任务步数上限（max_steps）
+  7. 重复拆分任务上限（max_plan_rejects）——拦住「拆分↔观察」死循环
   并把「最近动作 + 重复警告」回灌给模型，让它自己意识到该收手。
 """
 from __future__ import annotations
@@ -135,6 +136,8 @@ class AgentLoop:
         self.max_total_clicks = self.cfg.get("max_total_clicks", 12)
         # 屏幕连续无变化多少次 → 停
         self.max_stuck = self.cfg.get("max_no_change_steps", 3)
+        # 模型反复「拆分子任务」却不执行任何实际操作 → 停（防「拆分↔观察」死循环）
+        self.max_plan_rejects = self.cfg.get("max_plan_rejects", 2)
         self._user_stopped = False
 
     # ------------------------------------------------------------------ #
@@ -165,6 +168,7 @@ class AgentLoop:
         click_count = 0
         recent: List[str] = []  # 最近动作摘要，回灌给模型提醒它别重复
         perception_warned = False
+        plan_rejects = 0  # 被拒绝的「重复拆分」次数
 
         try:
             while self.state.running and self.state.step < self.max_steps:
@@ -238,6 +242,11 @@ class AgentLoop:
                     progress_hint = self._build_progress_hint(
                         recent, repeat_count, no_change_count
                     )
+                    # 2.6 子任务提示：计划已确定时，明确要求「执行当前子任务」，
+                    #     不给模型再拆分一次的机会（否则会陷入 拆分↔观察 死循环）
+                    sub_hint = self._build_subtask_hint()
+                    if sub_hint:
+                        progress_hint = (sub_hint + "\n\n" + progress_hint).strip()
                     warn = self._build_perception_warning(a11y_stats, marks_map)
                     if warn:
                         progress_hint = (progress_hint + "\n\n" + warn).strip()
@@ -265,19 +274,73 @@ class AgentLoop:
                         break
 
                     # 4. 处理 plan（任务拆分）
+                    #    ⚠️ 整个任务只接受一次拆分。曾经的 bug：plan 分支直接 continue，
+                    #    既不计数也不进卡死检测，于是模型只要每轮都输出 plan，
+                    #    就会无限循环在「拆分 → 观察 → 拆分 → 观察」，直到步数用尽。
                     if action.type == "plan":
-                        subtasks = action.args.get("subtasks", [])
-                        if subtasks:
-                            self.state.subtasks = list(subtasks)
+                        subtasks = [
+                            str(s).strip()
+                            for s in (action.args.get("subtasks") or [])
+                            if str(s).strip()
+                        ]
+
+                        # 4a. 首次拆分：接受（此后不再允许拆分）
+                        if subtasks and not self.state.subtasks:
+                            self.state.subtasks = subtasks
                             self.state.current_subtask = 0
-                            self.memory.set_subtasks(self.state.subtasks)
-                            self._emit(
-                                {"type": "plan", "subtasks": self.state.subtasks}
+                            self.memory.set_subtasks(subtasks)
+                            self._emit({"type": "plan", "subtasks": subtasks})
+                            log.info(
+                                "任务拆分为 %d 个子任务：%s",
+                                len(subtasks), " / ".join(subtasks),
                             )
-                            log.info("任务拆分为 %d 个子任务", len(subtasks))
-                            continue  # 不执行，直接进入下一轮
+                            self._trace_plan(
+                                run_dir=run_dir, step=step, obs_img=obs_img,
+                                marks_map=marks_map, marks_desc=marks_desc,
+                                a11y_stats=a11y_stats, action=action,
+                                raw_text=self.planner.last_raw_text,
+                                result_desc=f"已拆分为 {len(subtasks)} 个子任务",
+                            )
+                            continue  # 不执行动作，下一轮开始执行第一个子任务
+
+                        # 4b. 不该再拆分的两种情况 → 忽略 + 计数 + 回灌纠正提示
+                        plan_rejects += 1
+                        if subtasks:
+                            reason = (
+                                f"⚠️ 任务已经拆分过了，忽略这次重复拆分"
+                                f"（第 {plan_rejects} 次）"
+                            )
+                            tip = "现在必须直接执行当前子任务，输出 click / type / key 等具体动作"
                         else:
-                            action.type = "wait"
+                            reason = "⚠️ plan 动作没有给出 subtasks，已忽略"
+                            tip = "确实需要拆分时，subtasks 必须是非空的字符串列表"
+                        log.warning("%s：subtasks=%s", reason, subtasks)
+                        self._emit(
+                            {"type": "notice", "step": step,
+                             "message": f"{reason}。{tip}。"}
+                        )
+                        self._emit(
+                            {"type": "result", "step": step, "result": reason}
+                        )
+                        recent.append(f"步骤{step}: 重复拆分被系统忽略（{reason}）")
+                        del recent[:-6]
+                        self._trace_plan(
+                            run_dir=run_dir, step=step, obs_img=obs_img,
+                            marks_map=marks_map, marks_desc=marks_desc,
+                            a11y_stats=a11y_stats, action=action,
+                            raw_text=self.planner.last_raw_text,
+                            result_desc=reason,
+                        )
+                        if plan_rejects >= self.max_plan_rejects:
+                            self._auto_stop(
+                                step,
+                                "模型连续把任务反复拆分成子任务、却没有执行任何实际操作，"
+                                "已自动停止以免陷入死循环。请把任务描述得更具体一些，"
+                                "或换用能力更强的模型。",
+                                success=False,
+                            )
+                            break
+                        continue
 
                     # 4.5 子任务完成：推进到下一个；全部完成则结束任务
                     if action.type == "subtask_done":
@@ -474,6 +537,10 @@ class AgentLoop:
                         break
 
                     consecutive_failures = 0  # 成功执行，重置失败计数
+                    # 有「真正推进」的动作 → 清空无效拆分计数
+                    # （计的是「连续无进展的拆分」，偶发一次空 plan 不会累积误停）
+                    if action.type != "wait":
+                        plan_rejects = 0
 
                 except SafetyViolation as e:
                     log.warning("安全拦截：%s", e)
@@ -646,6 +713,61 @@ class AgentLoop:
                 best_d = d
                 best = (int(round(ex)), int(round(ey)), num, el)
         return best
+
+    def _build_subtask_hint(self) -> str:
+        """计划已确定时，明确把「当前子任务」摆到模型面前。
+
+        这一段是防止「拆分↔观察」死循环的关键：只要上下文里出现计划，
+        就告诉模型「不要再拆分，去执行」，并把当前子任务原样复述一遍。
+        """
+        subs = self.state.subtasks
+        if not subs:
+            return ""
+        idx = max(0, min(self.state.current_subtask, len(subs) - 1))
+        lines = ["【子任务计划（系统已确认，禁止再次拆分）】"]
+        for i, s in enumerate(subs):
+            if i < idx:
+                mark = "✅ 已完成"
+            elif i == idx:
+                mark = "→ 当前执行"
+            else:
+                mark = "待执行"
+            lines.append(f"  [{i + 1}/{len(subs)}] {mark}：{s}")
+        lines.append(
+            f"现在请只输出「完成当前子任务」所需的**一个具体动作**"
+            f"（click / type / key / scroll / skill 等）。"
+            f"**禁止再输出 plan**（会被系统直接忽略并记违规）；"
+            f"只有当前子任务确实完成了，才输出 subtask_done 推进到下一个。"
+        )
+        return "\n".join(lines)
+
+    def _trace_plan(
+        self,
+        *,
+        run_dir,
+        step: int,
+        obs_img,
+        marks_map: Dict[int, Any],
+        marks_desc: str,
+        a11y_stats: Dict[str, Any],
+        action: Action,
+        raw_text: str,
+        result_desc: str,
+    ) -> None:
+        """plan 步骤的排障记录（没有坐标，单独包一层省去重复参数）。"""
+        self._save_trace(
+            run_dir=run_dir,
+            step=step,
+            obs_img=obs_img,
+            marks_count=len(marks_map or {}),
+            marks_desc=marks_desc,
+            a11y_stats=a11y_stats or {},
+            action=action,
+            raw_x=None,
+            raw_y=None,
+            raw_text=raw_text,
+            result_desc=result_desc,
+        )
 
     def _build_perception_warning(
         self, a11y_stats: Dict[str, Any], marks_map: Dict[int, Any]
