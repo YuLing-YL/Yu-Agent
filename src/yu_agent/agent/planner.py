@@ -35,7 +35,14 @@ class Planner:
         )
 
         prompt_parts = []
-        prompt_parts.append(f"屏幕尺寸：{screen_size[0]} x {screen_size[1]}")
+        prompt_parts.append(
+            f"当前屏幕分辨率（逻辑像素）：{screen_size[0]} x {screen_size[1]}"
+        )
+        prompt_parts.append(
+            "注意：你看到的截图可能经过等比缩放。输出坐标时请按照上述逻辑像素分辨率估算"
+            "（即坐标范围 0~{screen_size[0]-1} 横向、0~{screen_size[1]-1} 纵向），"
+            "不要使用 0~1 或 0~1000 的归一化坐标。"
+        )
         if memory_context:
             prompt_parts.append(memory_context)
         if working_context:

@@ -3,6 +3,6 @@ from __future__ import annotations
 
 __version__ = "0.1.0"
 
-from .agent_facade import YuAgent, build_agent_from_settings
+from .agent_facade import YuAgent, build_agent_from_settings, build_test_agent
 
-__all__ = ["YuAgent", "build_agent_from_settings", "__version__"]
+__all__ = ["YuAgent", "build_agent_from_settings", "build_test_agent", "__version__"]

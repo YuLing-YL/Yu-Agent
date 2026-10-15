@@ -22,10 +22,10 @@ class YuAgent:
     def __init__(
         self,
         model_config: Optional[ModelConfig] = None,
-        use_mock: bool = False,
         dry_run: bool = False,
         callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         memory: Optional[MemoryManager] = None,
+        backend=None,
     ):
         setup_logging()
 
@@ -37,12 +37,15 @@ class YuAgent:
 
         self.model_config = model_config
 
-        # 构建后端
-        if use_mock or not model_config.is_configured:
-            provider = "mock"
+        # 构建后端：优先用注入的 backend（测试用），否则按配置构建
+        if backend is not None:
+            self.backend = backend
         else:
-            provider = model_config.provider
-        self.backend = get_backend(model_config, provider)
+            if not model_config.is_configured:
+                raise ConfigError(
+                    "尚未配置模型 API。请在「设置」中填写 base_url / api_key / 模型名。"
+                )
+            self.backend = get_backend(model_config, model_config.provider)
 
         # 记忆
         self.memory = memory or MemoryManager(enabled=settings.memory.get("enabled", True))
@@ -77,7 +80,20 @@ class YuAgent:
         self.memory.close()
 
 
-def build_agent_from_settings(callback=None, use_mock: bool = False, dry_run: bool = False) -> YuAgent:
+def build_agent_from_settings(callback=None, dry_run: bool = False) -> YuAgent:
     """根据当前设置构建 agent（设置页保存后调用）。"""
     reload_settings()
-    return YuAgent(use_mock=use_mock, dry_run=dry_run, callback=callback)
+    return YuAgent(dry_run=dry_run, callback=callback)
+
+
+def build_test_agent(callback=None, dry_run: bool = True) -> YuAgent:
+    """构建用于离线测试的 agent（mock 后端 + 内存记忆），不依赖 API 和真实屏幕。
+
+    供测试脚本 / pytest 使用，与生产 GUI 完全解耦。
+    """
+    from .memory.store import MemoryStore
+    from .models.mock import MockBackend
+
+    memory = MemoryManager(store=MemoryStore(db_path=":memory:"))
+    backend = MockBackend()
+    return YuAgent(backend=backend, memory=memory, dry_run=dry_run, callback=callback)

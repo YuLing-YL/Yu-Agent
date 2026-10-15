@@ -38,12 +38,16 @@ def get_screen_size() -> Screen:
 
 
 def capture_screen() -> Image.Image:
-    """截取当前整个屏幕，返回 RGB PIL 图像。"""
+    """截取当前整个屏幕，返回 RGB PIL 图像。
+
+    重要：返回的是「逻辑像素 1:1」的图像，与 pyautogui.click() 的坐标系一致。
+    这样模型看到的图坐标 == 实际点击坐标，避免 Retina 屏 / 缩放导致的偏移。
+    """
     if sys.platform == "darwin":
         img = _capture_macos()
         if img is not None:
             return img
-    # 通用路径：pyautogui
+    # 通用路径：pyautogui（screenshot() 返回的就是逻辑像素 1:1）
     try:
         import pyautogui
 
@@ -53,13 +57,20 @@ def capture_screen() -> Image.Image:
 
 
 def _capture_macos():
-    """macOS 用 Quartz 直接抓屏（无需 pyautogui 的 TCC 权限，但仍需屏幕录制授权）。"""
+    """macOS 用 Quartz 抓屏，并缩放到「逻辑像素」尺寸。
+
+    Quartz 的 CGWindowListCreateImage 在 Retina 屏上返回物理像素（2x），
+    而 pyautogui 的坐标是逻辑像素。这里按缩放因子缩回逻辑像素，保证坐标系一致。
+    """
     try:
         import Quartz  # type: ignore
+        from PIL import Image as _Image
 
-        rect = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
-        w = int(rect.size.width)
-        h = int(rect.size.height)
+        main_id = Quartz.CGMainDisplayID()
+        rect = Quartz.CGDisplayBounds(main_id)
+        logical_w = int(rect.size.width)
+        logical_h = int(rect.size.height)
+
         image_ref = Quartz.CGWindowListCreateImage(
             rect,
             Quartz.kCGWindowListOptionOnScreenOnly,
@@ -73,23 +84,22 @@ def _capture_macos():
         bytes_per_row = Quartz.CGImageGetBytesPerRow(image_ref)
         data_provider = Quartz.CGImageGetDataProvider(image_ref)
         data = Quartz.CGDataProviderCopyData(data_provider)
-        # 转 PIL
-        import Quartz  # noqa
-
-        from PIL import Image as _Image
 
         img = _Image.frombuffer(
             "RGBA", (width, height), data, "raw", "BGRA", bytes_per_row, 1
         ).convert("RGB")
+
+        # 若物理像素尺寸 != 逻辑像素尺寸（Retina 2x），缩回逻辑像素
+        if (width, height) != (logical_w, logical_h):
+            img = img.resize((logical_w, logical_h), _Image.LANCZOS)
         return img
     except Exception:
         return None
 
 
-def region_to_pixel(x: int, y: int, img: Image.Image) -> Tuple[int, int]:
-    """把模型返回的坐标（已按图像坐标系）转回屏幕像素。
+def region_to_pixel(x: float, y: float, scale_x: float, scale_y: float) -> Tuple[int, int]:
+    """把模型返回的坐标（基于缩放后的图）还原为屏幕逻辑像素坐标。
 
-    当前约定：模型输出的坐标直接是屏幕像素坐标（与截图 1:1）。
-    若截图被缩放过，需在此按比例还原。
+    scale_x / scale_y = 原图宽度/缩放图宽度（= 还原比例）。
     """
-    return int(x), int(y)
+    return int(round(x * scale_x)), int(round(y * scale_y))

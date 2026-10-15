@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap, QImage
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -20,13 +21,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..settings import get_saved_models, get_settings, switch_model
 from .settings_dialog import SettingsDialog
 from .theme import APP_STYLESHEET
 from .worker import AgentWorker
 
 
 class MainWindow(QMainWindow):
-    """主窗口：需求输入 + 实时截图预览 + 动作日志。"""
+    """主窗口：需求输入 + 模型选择 + 实时截图预览 + 动作日志。"""
 
     def __init__(self):
         super().__init__()
@@ -34,11 +36,12 @@ class MainWindow(QMainWindow):
         self.resize(1100, 720)
         self._worker: Optional[AgentWorker] = None
         self._build_ui()
+        self._reload_models()
 
         # 定时刷新截图预览
         self._preview_timer = QTimer(self)
         self._preview_timer.timeout.connect(self._refresh_preview)
-        self._preview_timer.start(1500)  # 每 1.5s 刷新
+        self._preview_timer.start(1500)
 
     # ---- UI 构建 ----
     def _build_ui(self) -> None:
@@ -82,21 +85,26 @@ class MainWindow(QMainWindow):
         self.task_input = QPlainTextEdit()
         self.task_input.setObjectName("taskInput")
         self.task_input.setPlaceholderText(
-            "例如：打开浏览器，搜索「天气」，然后截取当前页面…"
+            "例如：打开浏览器，搜索「天气」…\n也可以直接和我聊天，比如「你好」"
         )
         self.task_input.setMaximumHeight(90)
         input_layout.addWidget(self.task_input)
 
+        # 发送栏下方：模型选择 + 发送按钮
         btn_row = QHBoxLayout()
-        self.mock_check = QPushButton("离线演示")
-        self.mock_check.setObjectName("ghost")
-        self.mock_check.setCheckable(True)
-        self.mock_check.setToolTip("勾选后使用内置 mock 后端，无需 API Key 即可演示整个闭环")
-        btn_row.addWidget(self.mock_check)
+
+        model_label = QLabel("模型")
+        model_label.setObjectName("subtitle")
+        btn_row.addWidget(model_label)
+
+        self.model_combo = QComboBox()
+        self.model_combo.setMinimumWidth(220)
+        self.model_combo.currentIndexChanged.connect(self._on_model_changed)
+        btn_row.addWidget(self.model_combo)
 
         btn_row.addStretch()
 
-        self.run_btn = QPushButton("▶ 开始执行")
+        self.run_btn = QPushButton("▶ 发送")
         self.run_btn.setObjectName("primary")
         self.run_btn.clicked.connect(self._toggle_run)
         btn_row.addWidget(self.run_btn)
@@ -123,7 +131,7 @@ class MainWindow(QMainWindow):
         preview_header.addWidget(self.preview_status)
         preview_layout.addLayout(preview_header)
 
-        self.screenshot_label = QLabel("点击「开始执行」后显示屏幕截图")
+        self.screenshot_label = QLabel("点击「发送」后显示屏幕截图")
         self.screenshot_label.setAlignment(Qt.AlignCenter)
         self.screenshot_label.setMinimumSize(400, 300)
         self.screenshot_label.setStyleSheet(
@@ -144,7 +152,7 @@ class MainWindow(QMainWindow):
         log_layout = QVBoxLayout(log_panel)
         log_layout.setContentsMargins(12, 12, 12, 12)
 
-        log_title = QLabel("执行日志")
+        log_title = QLabel("对话与执行日志")
         log_title.setObjectName("sectionTitle")
         log_layout.addWidget(log_title)
 
@@ -164,49 +172,88 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(splitter, stretch=1)
 
         # 底部状态栏
-        self.status = QLabel("就绪 · 请先在「设置」中配置模型 API（或勾选「离线演示」）")
+        self.status = QLabel("就绪 · 请先在「设置」中配置模型 API")
         self.status.setObjectName("subtitle")
         root_layout.addWidget(self.status)
+
+    # ---- 模型选择 ----
+    def _reload_models(self) -> None:
+        """刷新模型下拉框（读取已保存的模型历史）。"""
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        saved = get_saved_models()
+        current = get_settings().get_model("default")
+
+        if saved:
+            for m in saved:
+                label = m["name"]
+                self.model_combo.addItem(label, m)
+            # 选中当前模型
+            for i in range(self.model_combo.count()):
+                d = self.model_combo.itemData(i)
+                if d and d.get("model") == current.model and d.get("base_url") == current.base_url:
+                    self.model_combo.setCurrentIndex(i)
+                    break
+        else:
+            self.model_combo.addItem("（未配置模型，请点设置）", None)
+        self.model_combo.blockSignals(False)
+
+    def _on_model_changed(self, index: int) -> None:
+        data = self.model_combo.itemData(index)
+        if data and data.get("model"):
+            switch_model(data["model"], data["base_url"])
+            self.status.setText(f"已切换模型：{data['model']}")
 
     # ---- 交互逻辑 ----
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self)
-        dlg.exec()
-        self._update_status_from_config()
+        if dlg.exec():
+            # 设置保存后刷新模型下拉框
+            self._reload_models()
+            self._update_status_from_config()
 
     def _update_status_from_config(self) -> None:
-        from ..settings import get_settings
-
         mc = get_settings().get_model("default")
         if mc.is_configured:
-            self.status.setText(f"已配置模型：{mc.model} @ {mc.base_url}")
+            self.status.setText(f"当前模型：{mc.model} @ {mc.base_url}")
         else:
-            self.status.setText("未配置 API · 请到「设置」填写，或勾选「离线演示」")
+            self.status.setText("未配置 API · 请到「设置」填写")
 
     def _toggle_run(self) -> None:
         if self._worker and self._worker.isRunning():
-            # 停止
             self._worker.stop()
-            self.run_btn.setText("▶ 开始执行")
+            self.run_btn.setText("▶ 发送")
             self.status.setText("正在停止…")
             return
 
         task = self.task_input.toPlainText().strip()
         if not task:
-            self.status.setText("请输入需求描述")
+            self.status.setText("请输入内容")
             return
 
-        use_mock = self.mock_check.isChecked()
-        self._worker = AgentWorker(task=task, use_mock=use_mock)
+        # 读取当前模型配置
+        mc = get_settings().get_model("default")
+        if not mc.is_configured:
+            self.status.setText("请先在「设置」中配置模型 API")
+            return
+
+        self._worker = AgentWorker(task=task, model_config=mc)
         self._worker.event.connect(self._on_event)
+        self._worker.reply.connect(self._on_reply)
         self._worker.finished.connect(self._on_finished)
 
         self.log_view.clear()
         self.subtask_label.clear()
         self.run_btn.setText("■ 停止")
-        self.status.setText(f"执行中：{task[:30]}…")
+        self.status.setText("思考中…")
 
         self._worker.start()
+
+    def _on_reply(self, reply_text: str) -> None:
+        """AI 给用户的回复文字。"""
+        ts = time.strftime("%H:%M:%S")
+        self.log_view.appendPlainText(f"[{ts}] 💬 {reply_text}")
+        self.status.setText(f"💬 {reply_text}")
 
     def _on_event(self, event: dict) -> None:
         etype = event.get("type")
@@ -241,14 +288,17 @@ class MainWindow(QMainWindow):
         steps = state.get("steps", 0)
         reason = state.get("reason", "")
 
-        if success:
+        if state.get("skipped"):
+            # 纯对话，未调用 agent
+            self.status.setText("💬 已回复")
+        elif success:
             self.log_view.appendPlainText(f"[{ts}] ✅ 任务完成（共 {steps} 步）")
             self.status.setText(f"✅ 完成：{reason}")
         else:
             self.log_view.appendPlainText(f"[{ts}] ❌ 任务结束（共 {steps} 步）：{reason}")
             self.status.setText(f"❌ {reason}")
 
-        self.run_btn.setText("▶ 开始执行")
+        self.run_btn.setText("▶ 发送")
 
     def _refresh_preview(self) -> None:
         """周期性刷新屏幕预览（只在运行中显示）。"""
@@ -258,7 +308,6 @@ class MainWindow(QMainWindow):
             from ..perception.screenshot import capture_screen
 
             img = capture_screen()
-            # 缩放预览
             img.thumbnail((520, 520))
             data = img.tobytes("raw", "RGB")
             qimg = QImage(data, img.width, img.height, img.width * 3, QImage.Format_RGB888)

@@ -19,12 +19,12 @@ from ..common.errors import (
     ModelError,
     SafetyViolation,
 )
-from ..common.image import image_to_data_url, scale_image
+from ..common.image import image_to_data_url, scale_factor, scale_image
 from ..common.logging import get_logger
 from ..grounding.resolver import GroundingResolver
 from ..grounding.verify import verify_screen_changed
 from ..memory import MemoryManager
-from ..perception.screenshot import capture_screen, get_screen_size
+from ..perception.screenshot import capture_screen, get_screen_size, region_to_pixel
 from ..safety.policy import check_action_allowed, detect_injection, sanitize_context
 from ..skills.registry import SkillRegistry
 from .planner import Planner
@@ -79,10 +79,12 @@ class AgentLoop:
                 step = self.state.step
 
                 try:
-                    # 1. observe：截屏
+                    # 1. observe：截屏（逻辑像素 1:1）
                     before = capture_screen()
                     screen = get_screen_size()
                     obs_img = scale_image(before, self.max_image_side)
+                    # 记录缩放比例，用于把模型返回的坐标还原回逻辑像素
+                    sx, sy = scale_factor(before, obs_img)
                     data_url = image_to_data_url(obs_img)
 
                     # 2. recall：召回记忆上下文（隔离为不可信内容）
@@ -115,6 +117,10 @@ class AgentLoop:
 
                     # 5. ground + safety 检查
                     check_action_allowed(action.type)
+
+                    # 5.5 坐标还原：模型基于缩放图返回的坐标 → 逻辑像素坐标
+                    if action.x is not None and action.y is not None:
+                        action.x, action.y = region_to_pixel(action.x, action.y, sx, sy)
 
                     # 6. act：执行动作
                     self._emit(

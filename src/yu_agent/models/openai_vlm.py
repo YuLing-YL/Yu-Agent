@@ -55,9 +55,10 @@ class OpenAICompatBackend:
             "temperature": req.temperature,
             "max_tokens": req.max_tokens,
         }
-        if req.json_mode:
-            payload["response_format"] = {"type": "json_object"}
-
+        # 注意：不发送 response_format={"type":"json_object"}。
+        # 该格式是 OpenAI 专属旧格式，本地模型（LM Studio/llama.cpp）和部分厂商
+        # 只接受 json_schema/text，会报 400。解析器本身已做容错（正则提取 JSON），
+        # JSON 输出约束改由 prompt 层保证。
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",

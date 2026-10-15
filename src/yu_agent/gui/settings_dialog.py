@@ -126,9 +126,19 @@ class SettingsDialog(QDialog):
         }
 
     def _save(self) -> None:
+        from ..settings import add_saved_model
+
         cfg = load_user_config()
-        cfg["model_config"] = self._collect()
+        collected = self._collect()
+        cfg["model_config"] = collected
         save_user_config(cfg)
+        # 把模型加入历史，方便主界面下拉框快速切换
+        add_saved_model(
+            name=collected["model"] or "未命名模型",
+            base_url=collected["base_url"],
+            api_key=collected["api_key"],
+            model=collected["model"],
+        )
         reload_settings()
         QMessageBox.information(self, "保存成功", "配置已保存并生效。")
         self.accept()

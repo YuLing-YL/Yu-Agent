@@ -116,6 +116,59 @@ def save_user_config(cfg: Dict[str, Any]) -> None:
         yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
 
 
+def get_saved_models() -> list[Dict[str, str]]:
+    """获取用户保存过的所有模型配置（用于 GUI 快速切换）。
+
+    返回列表，每项含 name/base_url/api_key/model。name 为 model 名（可带 base_url 简写）。
+    """
+    cfg = load_user_config()
+    models = cfg.get("saved_models", [])
+    result: list[Dict[str, str]] = []
+    for m in models:
+        if isinstance(m, dict) and m.get("model"):
+            result.append(
+                {
+                    "name": m.get("name") or m["model"],
+                    "base_url": m.get("base_url", ""),
+                    "api_key": m.get("api_key", ""),
+                    "model": m["model"],
+                }
+            )
+    return result
+
+
+def add_saved_model(name: str, base_url: str, api_key: str, model: str) -> None:
+    """保存一个新的模型配置到历史（去重：同名+同base_url 视为已存在则更新）。"""
+    cfg = load_user_config()
+    models = cfg.get("saved_models", [])
+    # 去重
+    models = [
+        m for m in models
+        if not (m.get("model") == model and m.get("base_url") == base_url)
+    ]
+    models.append(
+        {"name": name, "base_url": base_url, "api_key": api_key, "model": model}
+    )
+    cfg["saved_models"] = models
+    save_user_config(cfg)
+
+
+def switch_model(model: str, base_url: str) -> bool:
+    """把某个已保存的模型设为当前使用，返回是否成功。"""
+    for m in get_saved_models():
+        if m["model"] == model and m["base_url"] == base_url:
+            cfg = load_user_config()
+            cfg["model_config"] = {
+                "base_url": m["base_url"],
+                "api_key": m["api_key"],
+                "model": m["model"],
+            }
+            save_user_config(cfg)
+            reload_settings()
+            return True
+    return False
+
+
 def _apply_env(raw: Dict[str, Any]) -> Dict[str, Any]:
     """把环境变量覆盖到配置上（密钥优先从环境变量读）。"""
     out = copy.deepcopy(raw)

@@ -19,6 +19,11 @@ def scale_image(img: Image.Image, max_side: int) -> Image.Image:
     return img.resize(new_size, Image.LANCZOS)
 
 
+def scale_factor(img: Image.Image, scaled: Image.Image) -> Tuple[float, float]:
+    """计算缩放比例：原图尺寸 / 缩放图尺寸，用于把模型坐标还原回原图坐标。"""
+    return img.size[0] / scaled.size[0], img.size[1] / scaled.size[1]
+
+
 def image_to_base64(img: Image.Image, fmt: str = "png") -> str:
     """PIL 图像 -> base64 字符串（不含 data: 前缀）。"""
     buf = io.BytesIO()
