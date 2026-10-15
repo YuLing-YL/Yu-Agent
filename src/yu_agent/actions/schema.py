@@ -12,6 +12,7 @@ class Action(BaseModel):
     type: str = Field(..., description="动作类型")
     x: Optional[int] = None
     y: Optional[int] = None
+    mark: Optional[int] = None  # SOM 标记编号（优先于 x/y 使用）
     text: Optional[str] = None
     key: Optional[str] = None
     duration: float = 0.1

@@ -89,6 +89,7 @@ def _to_action(data: Dict[str, Any]) -> Action:
         type=str(data.get("type", data.get("action", ""))).lower(),
         x=_opt_int(data.get("x")),
         y=_opt_int(data.get("y")),
+        mark=_opt_int(data.get("mark", data.get("id", data.get("index")))),
         text=data.get("text"),
         key=data.get("key"),
         duration=float(data.get("duration", 0.1)),

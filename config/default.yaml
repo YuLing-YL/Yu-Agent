@@ -21,6 +21,8 @@ loop:
 perception:
   screenshot_format: png
   max_image_side: 1568       # 送模型前缩放，控制 token 成本
+  use_som: true              # 是否用 SOM 标记法（编号框）提升点击精度
+  som_max_elements: 100
   a11y_max_depth: 12
   a11y_max_elements: 400
 

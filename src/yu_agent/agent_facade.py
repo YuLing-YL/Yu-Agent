@@ -64,6 +64,7 @@ class YuAgent:
                 "verify_after_action": settings.loop.get("verify_after_action", True),
                 "screenshot_diff_threshold": settings.loop.get("screenshot_diff_threshold", 0.002),
                 "max_image_side": settings.perception.get("max_image_side", 1568),
+                "use_som": settings.perception.get("use_som", True),
             },
             dry_run=dry_run,
             callback=callback,

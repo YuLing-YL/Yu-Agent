@@ -25,6 +25,7 @@ from ..grounding.resolver import GroundingResolver
 from ..grounding.verify import verify_screen_changed
 from ..memory import MemoryManager
 from ..perception.screenshot import capture_screen, get_screen_size, region_to_pixel
+from ..perception.som import build_som_mapping, describe_marks
 from ..safety.policy import check_action_allowed, detect_injection, sanitize_context
 from ..skills.registry import SkillRegistry
 from .planner import Planner
@@ -62,6 +63,7 @@ class AgentLoop:
         self.verify_after_action = self.cfg.get("verify_after_action", True)
         self.diff_threshold = self.cfg.get("screenshot_diff_threshold", 0.002)
         self.max_image_side = self.cfg.get("max_image_side", 1568)
+        self.use_som = self.cfg.get("use_som", True)
 
     def run(self, task: str) -> AgentState:
         """执行一个任务，直到完成或达到步数上限。"""
@@ -85,6 +87,19 @@ class AgentLoop:
                     obs_img = scale_image(before, self.max_image_side)
                     # 记录缩放比例，用于把模型返回的坐标还原回逻辑像素
                     sx, sy = scale_factor(before, obs_img)
+
+                    # 1.5 SOM 标记：枚举可交互元素，画编号框，供模型精确指代
+                    marks_map = {}
+                    marks_desc = ""
+                    if self.use_som:
+                        try:
+                            marked_img, marks_map, _ = build_som_mapping(obs_img)
+                            obs_img = marked_img
+                            marks_desc = describe_marks(marks_map)
+                        except Exception as e:
+                            log.warning("SOM 标记失败，回退到像素坐标：%s", e)
+                            marks_map = {}
+
                     data_url = image_to_data_url(obs_img)
 
                     # 2. recall：召回记忆上下文（隔离为不可信内容）
@@ -98,6 +113,8 @@ class AgentLoop:
                         memory_context=mem_ctx,
                         working_context=work_ctx,
                         screen_size=(screen.width, screen.height),
+                        marks=marks_map,
+                        marks_desc=marks_desc,
                     )
 
                     # 4. 处理 plan（任务拆分）
@@ -118,9 +135,23 @@ class AgentLoop:
                     # 5. ground + safety 检查
                     check_action_allowed(action.type)
 
-                    # 5.5 坐标还原：模型基于缩放图返回的坐标 → 逻辑像素坐标
-                    if action.x is not None and action.y is not None:
+                    # 5.5 坐标解析：优先用 SOM 编号查表，否则用像素坐标还原
+                    raw_x, raw_y = action.x, action.y
+                    if action.mark is not None and action.mark in marks_map:
+                        el = marks_map[action.mark]
+                        action.x = int(round(el.cx * sx))
+                        action.y = int(round(el.cy * sy))
+                        log.info(
+                            "SOM 定位：#%d -> %s (%d,%d)",
+                            action.mark, el.label(), action.x, action.y,
+                        )
+                    elif action.x is not None and action.y is not None:
                         action.x, action.y = region_to_pixel(action.x, action.y, sx, sy)
+                        if sx != 1.0 or sy != 1.0:
+                            log.info(
+                                "坐标还原：(原始 %s,%s) * (%s,%s) → (%s,%s)",
+                                raw_x, raw_y, sx, sy, action.x, action.y,
+                            )
 
                     # 6. act：执行动作
                     self._emit(

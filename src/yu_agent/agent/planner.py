@@ -26,8 +26,13 @@ class Planner:
         memory_context: str = "",
         working_context: str = "",
         screen_size: tuple = (0, 0),
+        marks: Optional[Dict[int, Any]] = None,
+        marks_desc: str = "",
     ) -> Action:
-        """根据当前状态生成下一步动作。"""
+        """根据当前状态生成下一步动作。
+
+        marks: 编号 -> 元素映射（SOM 标记），非空时引导模型输出编号而非像素坐标。
+        """
         system = render_prompt(
             "system",
             actions=describe_actions(),
@@ -38,11 +43,26 @@ class Planner:
         prompt_parts.append(
             f"当前屏幕分辨率（逻辑像素）：{screen_size[0]} x {screen_size[1]}"
         )
-        prompt_parts.append(
-            "注意：你看到的截图可能经过等比缩放。输出坐标时请按照上述逻辑像素分辨率估算"
-            "（即坐标范围 0~{screen_size[0]-1} 横向、0~{screen_size[1]-1} 纵向），"
-            "不要使用 0~1 或 0~1000 的归一化坐标。"
-        )
+
+        if marks:
+            # SOM 模式：截图上有编号框，让模型优先输出编号
+            prompt_parts.append(
+                f"重要：截图上的可点击元素已用红色框标出，并在左上角标注了编号。"
+                f"请直接点击对应的编号，输出格式："
+                f'{{"type": "click", "mark": 编号, "reason": "..."}}。\n'
+                f"元素编号对照表：\n{marks_desc}\n"
+                f"如果你要点的目标不在编号列表里（例如需要先打开某个应用、或点击空白处），"
+                f"再使用像素坐标 x/y（范围 0~{screen_size[0] - 1} 横向、0~{screen_size[1] - 1} 纵向）。"
+            )
+        else:
+            prompt_parts.append(
+                f"重要：你看到的截图与屏幕是 1:1 对应的，没有缩放。"
+                f"请直接输出目标元素在截图中的像素坐标："
+                f"x 是横坐标（从左到右，范围 0~{screen_size[0] - 1}），"
+                f"y 是纵坐标（从上到下，范围 0~{screen_size[1] - 1}）。"
+                f"例如点击屏幕正中央，应输出 x={screen_size[0] // 2}, y={screen_size[1] // 2}。"
+                f"不要使用 0~1 或 0~1000 的归一化坐标。"
+            )
         if memory_context:
             prompt_parts.append(memory_context)
         if working_context:
