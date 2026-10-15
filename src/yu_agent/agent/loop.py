@@ -49,6 +49,13 @@ log = get_logger("yu_agent.loop")
 _CLICK_TYPES = {"click", "double_click", "right_click"}
 # 坐标量化网格（逻辑像素）：把相邻几像素的点击视为「同一个目标」
 _COORD_GRID = 20
+# 「可以输入文字」的角色（点了它们之后，下一步应该是 type 而不是再点一次）
+_INPUT_ROLES = {
+    "AXTextField", "AXTextArea", "AXSearchField", "AXSecureTextField", "AXComboBox",
+    "输入框", "文本域", "搜索框", "密码框", "下拉框",
+}
+# 角色识别不出来时，用标题/描述里的关键词兜底
+_INPUT_KEYWORDS = ("搜索", "输入", "地址", "网址", "search", "url", "输入框", "查找")
 
 
 def _quantize(v: Optional[int]) -> Optional[int]:
@@ -75,6 +82,20 @@ def _action_target_sig(action: Action) -> Tuple[Any, ...]:
     if t == "skill":
         return ("skill", action.skill or "")
     return (t,)
+
+
+def _is_input_like(el: Any) -> bool:
+    """判断这个元素是不是「可以输入文字」的控件。"""
+    try:
+        role = str(getattr(el, "role", "") or "")
+        title = str(getattr(el, "title", "") or "")
+        desc = str(getattr(el, "description", "") or "")
+    except Exception:
+        return False
+    if role in _INPUT_ROLES:
+        return True
+    text = f"{title} {desc}"
+    return any(k in text for k in _INPUT_KEYWORDS)
 
 
 def _describe_target(action: Action) -> str:
@@ -138,6 +159,8 @@ class AgentLoop:
         self.max_stuck = self.cfg.get("max_no_change_steps", 3)
         # 模型反复「拆分子任务」却不执行任何实际操作 → 停（防「拆分↔观察」死循环）
         self.max_plan_rejects = self.cfg.get("max_plan_rejects", 2)
+        # 「已点击但还没输入文字」的输入框描述（由 _build_input_hint 回灌给模型）
+        self._pending_input: Optional[str] = None
         self._user_stopped = False
 
     # ------------------------------------------------------------------ #
@@ -148,6 +171,7 @@ class AgentLoop:
         self.state = AgentState(task=task, running=True)
         self.memory.start_task(task)
         self._user_stopped = False
+        self._pending_input = None
 
         self._emit({"type": "start", "task": task})
         log.info("开始任务：%s", task)
@@ -238,21 +262,22 @@ class AgentLoop:
                     mem_ctx = sanitize_context(self.memory.recall_context(task))
                     work_ctx = sanitize_context(self.memory.working.context_for_prompt())
 
-                    # 2.5 进度提示：把「最近做过什么 / 是否在重复」告诉模型
-                    progress_hint = self._build_progress_hint(
-                        recent, repeat_count, no_change_count
-                    )
-                    # 2.6 子任务提示：计划已确定时，明确要求「执行当前子任务」，
-                    #     不给模型再拆分一次的机会（否则会陷入 拆分↔观察 死循环）
-                    sub_hint = self._build_subtask_hint()
-                    if sub_hint:
-                        progress_hint = (sub_hint + "\n\n" + progress_hint).strip()
+                    # 2.5 提示词组装（顺序 = 重要度递增，模型最后看到的最强）：
+                    #     子任务计划 → 最近动作 → 输入提醒 → 感知异常
+                    hint_parts = [
+                        self._build_subtask_hint(),
+                        self._build_progress_hint(
+                            recent, repeat_count, no_change_count
+                        ),
+                        self._build_input_hint(),
+                    ]
                     warn = self._build_perception_warning(a11y_stats, marks_map)
                     if warn:
-                        progress_hint = (progress_hint + "\n\n" + warn).strip()
+                        hint_parts.append(warn)
                         if not perception_warned:  # 只在首次提醒用户，避免刷屏
                             perception_warned = True
                             self._emit({"type": "notice", "step": step, "message": warn})
+                    progress_hint = "\n\n".join(p for p in hint_parts if p)
 
                     # 3. think：模型决策
                     if self._user_stopped:
@@ -380,8 +405,10 @@ class AgentLoop:
 
                     # 5.5 坐标解析：优先用 SOM 编号查表，否则用像素坐标还原
                     raw_x, raw_y = action.x, action.y
+                    clicked_el = None  # 本步点击的是哪个已标记元素（用于判断是否点了输入框）
                     if action.mark is not None and action.mark in marks_map:
                         el = marks_map[action.mark]
+                        clicked_el = el
                         # 元素坐标本身就是逻辑像素（与点击同一坐标系），不要乘缩放比
                         action.x = int(round(el.cx))
                         action.y = int(round(el.cy))
@@ -405,6 +432,7 @@ class AgentLoop:
                         )
                         if snap is not None:
                             sx_, sy_, num, el = snap
+                            clicked_el = el
                             log.info(
                                 "坐标吸附：模型给的 (%d,%d) → #%d %s 中心 (%d,%d)",
                                 action.x, action.y, num, el.label(), sx_, sy_,
@@ -438,6 +466,24 @@ class AgentLoop:
                         result_desc = f"[dry-run] 跳过执行：{action.type}"
                     else:
                         result_desc = self._execute(action)
+
+                    # 6.5 输入流程看护：
+                    #     点了输入框却没接着输入文字，是本地模型最常见的失败模式——
+                    #     它会反复点同一个输入框、直到重复检测把它当成"任务完成"。
+                    #     这里记下来，下一轮用一条强提示把模型推回 type 动作。
+                    if (
+                        action.type in _CLICK_TYPES
+                        and clicked_el is not None
+                        and _is_input_like(clicked_el)
+                    ):
+                        self._pending_input = clicked_el.label()
+                        result_desc += "（输入框已聚焦：下一步必须用 type 输入文字）"
+                        log.info(
+                            "点击了输入框「%s」：下一轮必须输出 type 输入文字",
+                            self._pending_input,
+                        )
+                    elif action.type == "type":
+                        self._pending_input = None
 
                     # 7. verify：校验屏幕变化
                     screen_changed = True
@@ -603,14 +649,26 @@ class AgentLoop:
         """多层卡死检测。
 
         返回 None = 继续执行；返回 (原因, 是否算作成功) = 应停止。
-        「重复做同一件已完成的事」视为任务其实已达成（success=True）；
-        「乱点到预算上限 / 连续失败」视为未完成（success=False）。
+
+        「重复做同一件事」是否算成功，**要看屏幕有没有反应**：
+        - 屏幕每次都变了 → 动作是有效的，模型只是没收手，大概率任务已完成 → success=True
+        - 屏幕始终没变化 → 这些操作根本没生效（例如反复点输入框却始终没输出 type），
+          这种情况**不能**报"已完成"，否则界面会显示 ✅ 而任务其实没做完 → success=False
         """
         target = _describe_target(action)
+        no_effect = self.verify_after_action and no_change_count >= 1
 
-        # (a) 连续完全相同的动作 → 大概率任务已完成（模型在无效地重复）
+        # (a) 连续完全相同的动作
         #     wait 是"等加载"，本身不点击，交给下面更宽松的累计上限处理
         if action.type != "wait" and repeat_count >= self.max_repeats:
+            if no_effect:
+                return (
+                    f"连续 {repeat_count} 次重复同一个动作（{action.type}"
+                    f"{(' ' + target) if target else ''}），且屏幕一直没有变化——"
+                    f"说明这个动作并没有生效，任务**很可能没有完成**。已自动停止。"
+                    f"如果这一步本来是要输入文字，请检查是否用了 type 动作。",
+                    False,
+                )
             return (
                 f"连续 {repeat_count} 次执行了完全相同的动作（{action.type}"
                 f"{(' ' + target) if target else ''}），已自动停止。"
@@ -622,6 +680,12 @@ class AgentLoop:
         total = sig_totals.get(sig, 0)
         if action.type in _CLICK_TYPES:
             if total >= self.max_same_target:
+                if no_effect:
+                    return (
+                        f"同一个位置/目标已被重复点击 {total} 次，且屏幕一直没有变化——"
+                        f"判定该操作无效，任务**很可能没有完成**，已自动停止。",
+                        False,
+                    )
                 return (
                     f"同一个位置/目标已被重复操作 {total} 次"
                     f"（最近一次：{action.type} {target}），"
@@ -641,12 +705,14 @@ class AgentLoop:
                 False,
             )
 
-        # (d) 屏幕连续无变化 → 界面没反应或任务已完成
+        # (d) 屏幕连续无变化 → 操作没生效/界面无响应。
+        #     这里**不能**报成功：没有任何证据说明任务完成了。
         if self.verify_after_action and no_change_count >= self.max_stuck:
             return (
-                f"屏幕连续 {no_change_count} 次没有任何变化，界面可能已无响应，"
-                f"或任务其实已经完成，已自动停止。",
-                True,
+                f"屏幕连续 {no_change_count} 次没有任何变化，说明这些操作都没有生效"
+                f"（界面无响应，或者动作方式不对）。已自动停止，"
+                f"但无法确认任务已完成，请检查界面当前状态。",
+                False,
             )
 
         return None
@@ -767,6 +833,23 @@ class AgentLoop:
             raw_y=None,
             raw_text=raw_text,
             result_desc=result_desc,
+        )
+
+    def _build_input_hint(self) -> str:
+        """「点了输入框但还没输入文字」时，把模型推回 type 动作。
+
+        这是本地模型最典型的失败模式：点了搜索框 → 又点一次搜索框 → 再点一次，
+        然后被重复检测当成"任务已完成"。输入框只需要点一次，之后就该是 type。
+        """
+        if not self._pending_input:
+            return ""
+        return (
+            f"【系统提示】你上一步已经点击了输入框「{self._pending_input}」，"
+            f"但**现在还没有输入任何文字**。输入框只需点一次，它已经聚焦了。\n"
+            f'下一步**必须**输出：{{"type": "type", "text": "你要输入的内容"}}，'
+            f"把文字打进去（`type` 不需要坐标或编号，直接输到当前焦点）。\n"
+            f'输入完成后，如果需要提交，再输出 {{"type": "key", "key": "enter"}}。\n'
+            f"**绝对不要再次点击这个输入框**——那不会输入任何东西。"
         )
 
     def _build_perception_warning(

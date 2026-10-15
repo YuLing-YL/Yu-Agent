@@ -30,8 +30,10 @@ SUPPORTED_ACTIONS = {
     "click": "在 (x, y) 左键单击；若截图有编号框，可用 mark 指定编号",
     "double_click": "在 (x, y) 双击",
     "right_click": "在 (x, y) 右键",
-    "type": "在当前位置输入 text 文本",
-    "key": "按下组合键/快捷键，key 形如 'enter'、'ctrl+c'、'cmd+space'",
+    "type": "输入文字：把 text 打到「当前已聚焦的输入框」里。**输入文字必须先 click 点一下输入框，"
+            "然后下一步用 type**；type 不需要坐标或编号，也不要点第二次输入框。支持中文。",
+    "key": "按下按键/组合键，key 形如 'enter'（提交搜索）、'esc'、'tab'、'cmd+l'（浏览器地址栏）、"
+           "'cmd+c'、'cmd+v'。修饰键请写 cmd / ctrl / option / shift。",
     "scroll": "滚动，x/y 为位置，text 填 'up'/'down' 或数值",
     "move": "移动鼠标到 (x, y)",
     "drag": "从 (x, y) 拖到 args.dx/dy",

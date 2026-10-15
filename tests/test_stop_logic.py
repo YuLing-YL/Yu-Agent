@@ -18,6 +18,12 @@ from yu_agent.perception.screenshot import Screen
 from yu_agent.skills import build_default_registry
 
 # ── 打桩：避免真实截屏与真实鼠标操作 ──
+# 先把原始函数存下来，跑完本文件后必须还原：pytest 会「先导入全部测试模块再执行用例」，
+# 模块级的全局替换会污染其它测试文件（曾经把 test_input_module 的执行器一起换掉）。
+_ORIG_EXECUTE = ex.ActionExecutor.execute
+_ORIG_CAPTURE = loopmod.capture_screen
+_ORIG_SOM = loopmod.build_som_mapping
+
 loopmod.capture_screen = lambda: Image.new("RGB", (1512, 982))
 loopmod.get_screen_size = lambda: Screen(1512, 982)
 # SOM 打桩成"不标注"，这样 mark 不会被解析出坐标，正好顺便测 mark 兜底
@@ -182,5 +188,62 @@ st9 = lp9.run("打开浏览器搜索天气")
 print(f"\n场景9(偶发重复拆分): steps={st9.step} success={st9.success} auto={st9.auto_stopped}")
 assert st9.success and not st9.auto_stopped, f"不该误停：{st9.reason}"
 assert st9.step == 6, f"应为 6 步，实际 {st9.step}"
+
+# ── 场景 10：点了输入框却不输入（真实用户场景）→ 必须提示「下一步 type」，
+#            且因为屏幕无变化，不该被当成「任务完成」──
+from yu_agent.perception.a11y import UIElement  # noqa: E402
+
+_search_box = UIElement(
+    id=0, role="AXTextField", title="智能搜索栏",
+    x=900, y=60, w=300, h=30, app="Safari浏览器",
+)
+_orig_som = loopmod.build_som_mapping
+loopmod.build_som_mapping = lambda img, *a, **k: (img, {9: _search_box}, [_search_box])
+
+prompts10 = []
+
+
+class RecordingBackend(Backend):
+    def chat(self, req):
+        prompts10.append(req.prompt)
+        return super().chat(req)
+
+
+bk10 = RecordingBackend(['{"type": "click", "mark": 9, "reason": "点击搜索栏"}'] * 10)
+lp10 = AgentLoop(bk10, make_memory(), build_default_registry(),
+                 config={"max_steps": 10, "verify_after_action": True,
+                         "max_repeated_actions": 99, "max_same_action_total": 3,
+                         "max_no_change_steps": 99},
+                 dry_run=True)
+st10 = lp10.run("打开浏览器搜索今天天气")
+loopmod.build_som_mapping = _orig_som
+print(f"\n场景10(点输入框不输入): steps={st10.step} success={st10.success} auto={st10.auto_stopped}")
+print(f"  reason: {st10.reason}")
+assert st10.step == 3, f"同一目标点 3 次就该停，实际 {st10.step}"
+assert '"type": "type"' in prompts10[1], "第 2 步提示词必须明确要求输出 type"
+assert "还没有输入任何文字" in prompts10[1], "缺少『点了输入框还没输入』的提醒"
+assert not st10.success, "屏幕始终没变化，不该判定为任务完成（修复前是 ✅）"
+
+# ── 场景 11：正确的输入流程（click → type → enter）→ 正常完成 ──
+seq11 = [
+    '{"type": "click", "mark": 9, "reason": "点击搜索栏"}',
+    '{"type": "type", "text": "今天天气", "reason": "输入关键词"}',
+    '{"type": "key", "key": "enter", "reason": "提交搜索"}',
+    '{"type": "done", "reason": "已搜索"}',
+]
+bk11 = RecordingBackend(seq11)
+lp11 = AgentLoop(bk11, make_memory(), build_default_registry(),
+                 config={"max_steps": 10, "verify_after_action": False}, dry_run=True)
+loopmod.build_som_mapping = lambda img, *a, **k: (img, {9: _search_box}, [_search_box])
+st11 = lp11.run("打开浏览器搜索今天天气")
+loopmod.build_som_mapping = _orig_som
+print(f"\n场景11(正确输入流程): steps={st11.step} success={st11.success}")
+assert st11.success and st11.step == 4, f"应 4 步完成，实际 {st11.step}"
+assert lp11._pending_input is None, "type 执行后应清空『待输入』标记"
+
+# ── 还原全局打桩，避免污染其它测试文件 ──
+ex.ActionExecutor.execute = _ORIG_EXECUTE
+loopmod.capture_screen = _ORIG_CAPTURE
+loopmod.build_som_mapping = _ORIG_SOM
 
 print("\nALL PASS")
