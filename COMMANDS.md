@@ -82,6 +82,7 @@ python -m yu_agent perceive                    # 全部默认
 python -m yu_agent perceive --max 60 -o /tmp/marks.png   # 少标记一些，只看重点
 python -m yu_agent perceive --dock-max 40      # 程序坞图标很多时调大
 python -m yu_agent perceive --max-apps 3       # 只看最前面 3 个应用
+python -m yu_agent perceive --clean            # 清场模式：预览 agent 实际看到的效果
 ```
 
 输出示例：
@@ -115,7 +116,12 @@ python -m yu_agent perceive --max-apps 3       # 只看最前面 3 个应用
 
 #### 感知的覆盖范围（重要）
 
-现在的枚举策略是「**屏幕上所有可见应用 + 完整的程序坞**」：
+**默认（清场模式，`agent.reset_desktop: true`）**：只标「当前最前面的应用 + 程序坞」，
+背景应用的按钮一个都不标。屏幕再乱也不会干扰识别。
+想让模型同时看到多个窗口时，关掉清场（GUI 取消勾选 / `run --no-reset` / 配置改 false），
+就会回到下面的完整枚举。
+
+**完整枚举（清场关闭时）**：
 
 - 按窗口前后顺序枚举最多 `som_max_apps`（默认 6）个应用；
   前台应用拿一半预算，其余应用平分剩下的。
@@ -216,6 +222,40 @@ loop:
   som_dock_max_marks: 30    # 程序坞图标上限
   som_max_apps: 6           # 最多枚举几个可见应用
 ```
+
+### 屏幕上的应用太多太乱，识别被干扰
+
+已处理。任务开始前会走一步「清场」，两层保障：
+
+**① 尽力隐藏其它应用**：对每个有 Dock 图标的应用调用 `NSRunningApplication.hide()`
+（等价于逐个按 ⌘H）——**不退出、不关窗**，窗口和内容都在，点程序坞图标就原样恢复。
+被隐藏的应用会写进日志和 GUI 日志（`🧹 已隐藏 N 个应用…`）。
+
+⚠️ 系统限制：**从后台进程调 `hide()` 会被 macOS 直接拒绝**（返回 NO，即使辅助功能权限正常）。
+所以这一层是"尽力而为"，从 GUI 里点「发送」时通常能成功；失败时不会报错，只如实说明。
+
+**② 只标当前应用（一定生效）**：不论隐藏成功与否，清场模式下 SOM 只标记
+「**当前最前面的应用 + 程序坞**」，背景应用的按钮一个都不标。
+这条不依赖任何权限，所以即使窗口藏不掉，编号表也不会被背景应用淹没。
+
+实测（本机，3 个应用窗口）：
+
+```
+清场关闭：119 个标记（WorkBuddy 46 + 文本编辑 23 + 访达 23 + 程序坞 27）
+清场开启： 73 个标记（当前应用 46 + 程序坞 27）
+```
+
+配置与开关：
+
+```yaml
+agent:
+  reset_desktop: true          # 默认开启
+  reset_desktop_keep: []       # 额外不想被隐藏的应用，如 ["微信"]
+```
+
+- GUI：发送栏右侧「运行前清空桌面」复选框（勾选状态会存进 `data/config/user.yaml`）。
+- CLI：`python -m yu_agent run "任务" --no-reset` 本次关闭；`perceive --clean` 预览清场效果。
+- 任务描述里**点名的应用不会被隐藏**（例如任务含「Safari」，就不隐藏 Safari）。
 
 ### agent 找不到输入框
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 
@@ -16,6 +17,10 @@ def main(argv=None) -> int:
     p_run = sub.add_parser("run", help="在命令行执行一个任务")
     p_run.add_argument("task", help="任务描述")
     p_run.add_argument("--dry-run", action="store_true", help="只规划不执行")
+    p_run.add_argument(
+        "--no-reset", action="store_true",
+        help="本次不清场（不隐藏其它应用，也照常枚举所有可见应用）",
+    )
 
     # test：离线测试闭环（无需 API / 屏幕）
     p_test = sub.add_parser("test", help="用 mock 后端离线测试完整闭环（无需 API 和屏幕）")
@@ -34,6 +39,10 @@ def main(argv=None) -> int:
     p_per.add_argument("--max", type=int, default=120, help="最多标记多少个元素")
     p_per.add_argument("--dock-max", type=int, default=30, help="程序坞最多标记几个图标")
     p_per.add_argument("--max-apps", type=int, default=6, help="最多枚举几个可见应用")
+    p_per.add_argument(
+        "--clean", action="store_true",
+        help="先清场（尽力隐藏其它应用）并只标当前应用，预览 agent 实际看到的效果",
+    )
 
     # logs：查看日志文件位置 / 末尾内容
     p_log = sub.add_parser("logs", help="显示日志文件路径（或末尾若干行）")
@@ -68,8 +77,14 @@ def main(argv=None) -> int:
 
 def _run(args) -> int:
     from .agent_facade import YuAgent
+    from .settings import get_settings
 
     agent = YuAgent(dry_run=args.dry_run)
+    if getattr(args, "no_reset", False):
+        # 本次关闭清场：恢复「枚举所有可见应用」的行为
+        agent.loop.reset_desktop = False
+        agent.loop.som_max_apps = int(get_settings().loop.get("som_max_apps", 6))
+        print("已关闭清场：本次不隐藏其它应用，照常枚举所有可见应用")
     state = agent.run(args.task)
     print(f"\n结果：success={state.success}，步骤={state.step}，原因={state.reason}")
     agent.close()
@@ -117,6 +132,14 @@ def _perceive(args) -> int:
     from .perception import a11y as a11y_mod
     from .perception.screenshot import capture_screen
     from .perception.som import build_som_mapping
+
+    if getattr(args, "clean", False):
+        # 和 agent 的「清场模式」完全一致：先尽力隐藏其它应用，再只标当前应用 + 程序坞
+        from .actions.desktop import clean_desktop
+
+        report = clean_desktop(task="", keep=[], exclude_pids=[os.getpid()])
+        print(f"清场：{report.summary()}")
+        args.max_apps = 1
 
     img = capture_screen()
     print(f"屏幕截图：{img.size[0]}x{img.size[1]}（逻辑像素）")

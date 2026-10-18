@@ -18,9 +18,11 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from ..actions.desktop import CleanReport, clean_desktop
 from ..actions.executor import ActionExecutor
 from ..actions.schema import Action
 from ..common.errors import (
@@ -161,6 +163,16 @@ class AgentLoop:
         self.max_plan_rejects = self.cfg.get("max_plan_rejects", 2)
         # 「已点击但还没输入文字」的输入框描述（由 _build_input_hint 回灌给模型）
         self._pending_input: Optional[str] = None
+        # ── 运行前清场：把其它应用隐藏掉，减少 SOM 标记干扰 ──
+        # 默认关闭：只有通过配置（GUI/CLI）显式开启才会动用户的窗口，
+        # 避免单元测试或库调用时意外把别人的桌面收掉。
+        self.reset_desktop = bool(self.cfg.get("reset_desktop", False))
+        self.reset_desktop_keep = list(self.cfg.get("reset_desktop_keep") or [])
+        self._clean_report: Optional[CleanReport] = None
+        if self.reset_desktop:
+            # 清场模式：只标记「当前最前面的应用 + 程序坞」，背景应用的按钮一个都不标。
+            # 这是不依赖任何权限的兜底——即使系统不允许隐藏窗口，屏幕再乱也不会干扰识别。
+            self.som_max_apps = 1
         self._user_stopped = False
 
     # ------------------------------------------------------------------ #
@@ -175,6 +187,12 @@ class AgentLoop:
 
         self._emit({"type": "start", "task": task})
         log.info("开始任务：%s", task)
+
+        # 0. 清场：隐藏其它应用，只留桌面 + 程序坞。
+        #    屏幕上的窗口越少，SOM 枚举出来的干扰元素就越少，模型也更容易选对目标。
+        self._clean_report = None
+        if self.reset_desktop and not self.dry_run and not self._user_stopped:
+            self._prepare_desktop(task)
 
         # 本次运行的排障记录目录（截图 + trace.jsonl），用于事后定位点错/找不到元素
         run_dir = None
@@ -265,6 +283,7 @@ class AgentLoop:
                     # 2.5 提示词组装（顺序 = 重要度递增，模型最后看到的最强）：
                     #     子任务计划 → 最近动作 → 输入提醒 → 感知异常
                     hint_parts = [
+                        self._build_prepare_hint(step),
                         self._build_subtask_hint(),
                         self._build_progress_hint(
                             recent, repeat_count, no_change_count
@@ -834,6 +853,47 @@ class AgentLoop:
             raw_text=raw_text,
             result_desc=result_desc,
         )
+
+    def _prepare_desktop(self, task: str) -> None:
+        """任务开始前隐藏其它应用（⌘H 语义，不退出、不关窗）。"""
+        try:
+            report = clean_desktop(
+                task=task,
+                keep=self.reset_desktop_keep,
+                exclude_pids=[os.getpid()],
+            )
+        except Exception as e:  # 清场失败不影响主流程
+            log.warning("清空桌面失败（忽略，继续执行）：%s", e)
+            return
+        self._clean_report = report
+        msg = report.summary()
+        self._emit({"type": "prepare", "message": msg, "hidden": report.hidden})
+        if report.hidden:
+            log.info("已清空桌面：%s", msg)
+        else:
+            log.info("清场：%s", msg)
+
+    def _build_prepare_hint(self, step: int) -> str:
+        """第一步告诉模型「清场模式已生效」，让它从程序坞打开目标应用。"""
+        r = self._clean_report
+        if step > 1 or r is None:
+            return ""
+        lines = ["【清场模式】本轮只标记「当前最前面的应用 + 程序坞」，背景应用的按钮不会被标记。"]
+        if r.hidden:
+            kept = f"（保留：{'、'.join(r.kept[:4])}）" if r.kept else ""
+            lines.append(
+                f"任务开始前已隐藏其它 {len(r.hidden)} 个应用{kept}，"
+                f"它们只是被隐藏、没有关闭也没有丢状态，点程序坞图标就能原样恢复。"
+            )
+        elif r.error:
+            lines.append(f"（隐藏其它应用失败：{r.error}）")
+        else:
+            lines.append("（系统不允许隐藏其它应用的窗口，所以没有动它们。）")
+        lines.append(
+            "如果你要操作的应用**现在不在前台**，请先点程序坞里它的图标把它调到前台，"
+            "下一步它的界面控件才会被标记出来。不要凭记忆去点别的窗口。"
+        )
+        return "\n".join(lines)
 
     def _build_input_hint(self) -> str:
         """「点了输入框但还没输入文字」时，把模型推回 type 动作。

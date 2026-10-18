@@ -75,6 +75,9 @@ class YuAgent:
                 "max_total_clicks": settings.agent.max_total_clicks,
                 "max_no_change_steps": settings.agent.max_no_change_steps,
                 "max_plan_rejects": settings.agent.max_plan_rejects,
+                # 运行前清场：隐藏其它应用，减少屏幕上窗口太多造成的识别干扰
+                "reset_desktop": settings.agent.reset_desktop,
+                "reset_desktop_keep": settings.agent.reset_desktop_keep,
             },
             dry_run=dry_run,
             callback=callback,

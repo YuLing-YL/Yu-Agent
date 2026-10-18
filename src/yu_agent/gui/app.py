@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap, QImage
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -126,6 +127,17 @@ class MainWindow(QMainWindow):
 
         btn_row.addStretch()
 
+        # 运行前清空桌面：隐藏其它应用，减少识别干扰（⌘H 语义，不关窗）
+        self.reset_desktop_cb = QCheckBox("运行前清空桌面")
+        self.reset_desktop_cb.setToolTip(
+            "任务开始前把其它应用隐藏（⌘H，不退出、不关窗），并且只标记「当前应用 + 程序坞」，\n"
+            "背景应用的按钮不会再混进编号表。点程序坞图标即可恢复被隐藏的窗口。\n"
+            "（若系统不允许隐藏其它应用，仍然会只标记当前应用，识别一样不会被干扰）"
+        )
+        self.reset_desktop_cb.setChecked(bool(get_settings().agent.reset_desktop))
+        self.reset_desktop_cb.toggled.connect(self._on_reset_desktop_toggled)
+        btn_row.addWidget(self.reset_desktop_cb)
+
         self.run_btn = QPushButton("▶ 发送")
         self.run_btn.setObjectName("primary")
         self.run_btn.clicked.connect(self._toggle_run)
@@ -241,6 +253,19 @@ class MainWindow(QMainWindow):
         else:
             self.status.setText("未配置 API · 请到「设置」填写")
 
+    def _on_reset_desktop_toggled(self, checked: bool) -> None:
+        """持久化「运行前清空桌面」开关（写进 user.yaml 的 agent.reset_desktop）。"""
+        from ..settings import set_agent_option
+
+        try:
+            set_agent_option("reset_desktop", bool(checked))
+            self.status.setText(
+                "已开启：每次运行前会隐藏其它应用" if checked
+                else "已关闭：运行前不动你的窗口"
+            )
+        except Exception as e:
+            self.status.setText(f"保存失败：{e}")
+
     def _toggle_run(self) -> None:
         if self._worker and self._worker.isRunning():
             self._stop_run()
@@ -319,6 +344,11 @@ class MainWindow(QMainWindow):
                     self.log_view.appendPlainText(f"[{ts}] 📄 日志文件：{p}")
             except Exception:
                 pass
+        elif etype == "prepare":
+            msg = event.get("message", "")
+            self.log_view.appendPlainText(f"[{ts}] 🧹 {msg}")
+            self.status.setText(f"🧹 {msg}")
+            self.floating.update_status("清空桌面…")
         elif etype == "plan":
             subtasks = event.get("subtasks", [])
             lines = ["📋 任务拆分："]

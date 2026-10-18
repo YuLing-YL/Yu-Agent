@@ -598,12 +598,14 @@ def get_all_interactive_elements(
     dock = get_dock_elements(max(4, dock_max))
     app_budget = max(1, max_elements - len(dock))
 
-    # 预算：前台应用拿一半，其余应用平分另一半
+    # 预算：前台应用拿一半，其余应用平分另一半。
+    # 注意：只枚举 1 个应用（清场模式）时也要按「前台预算」封顶，
+    # 否则单个应用会吃掉全部预算（实测从 46 个涨到 74 个，编号反而更乱）。
     n = len(order)
+    front_cap = max(15, int(app_budget * 0.5))
     if n <= 1:
-        caps = [app_budget] if n else []
+        caps = [front_cap] if n else []
     else:
-        front_cap = max(15, int(app_budget * 0.5))
         others = max(8, (app_budget - front_cap) // (n - 1))
         caps = [front_cap] + [others] * (n - 1)
 

@@ -7,7 +7,7 @@ from __future__ import annotations
 import copy
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 from pydantic import BaseModel, Field
@@ -47,6 +47,9 @@ class AgentConfig(BaseModel):
     max_total_clicks: int = 12  # 单个任务的点击总预算
     max_no_change_steps: int = 3  # 屏幕连续无变化多少次判定卡住
     max_plan_rejects: int = 2  # 重复拆分子任务多少次判定死循环并停止
+    # ── 运行前清场：隐藏其它应用，减少屏幕上窗口太多造成的识别干扰 ──
+    reset_desktop: bool = True
+    reset_desktop_keep: List[str] = Field(default_factory=list)  # 额外保留、不要隐藏的应用名
     stop_on_grounding_error: bool = True
     dry_run: bool = False
 
@@ -174,6 +177,21 @@ def switch_model(model: str, base_url: str) -> bool:
             reload_settings()
             return True
     return False
+
+
+def set_agent_option(key: str, value: Any) -> None:
+    """把单个 `agent.*` 选项写进用户配置并重新加载（GUI 开关用）。
+
+    只覆盖这一个键，其它 agent 配置（来自 default.yaml）不受影响。
+    """
+    cfg = load_user_config()
+    agent = cfg.get("agent")
+    if not isinstance(agent, dict):
+        agent = {}
+    agent[key] = value
+    cfg["agent"] = agent
+    save_user_config(cfg)
+    reload_settings()
 
 
 def _apply_env(raw: Dict[str, Any]) -> Dict[str, Any]:

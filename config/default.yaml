@@ -13,6 +13,11 @@ agent:
   max_total_clicks: 12         # 单个任务点击总预算，超过即自动停止
   max_no_change_steps: 3       # 屏幕连续无变化多少次判定卡住并自动停止
   max_plan_rejects: 2          # 反复「拆分子任务」却不执行任何操作多少次判定死循环并停止
+  # ── 运行前清场（推荐开启）──
+  # 任务开始前把其它应用隐藏（⌘H 语义，不退出不关窗），屏幕上只剩桌面 + 程序坞，
+  # 这样 SOM 编号表不会被一堆背景窗口的按钮淹没。点程序坞图标即可恢复原窗口。
+  reset_desktop: true
+  reset_desktop_keep: []       # 额外不想被隐藏的应用名，如 ["微信", "终端"]
   stop_on_grounding_error: true   # 定位失败时是否直接终止（false 则交给反思重试）
   dry_run: false             # true = 只规划不执行（安全调试）
 
@@ -23,7 +28,7 @@ loop:
   som: true                  # 是否在截图上画编号标记（Set-of-Mark）
   som_max_marks: 120         # 最多标记多少个元素（总数上限）
   som_dock_max_marks: 30     # 程序坞最多标记几个图标（图标多时不会只标一半）
-  som_max_apps: 6            # 最多枚举几个可见应用（按前后顺序，前台应用优先）
+  som_max_apps: 6            # 最多枚举几个可见应用（清场模式开启时固定为 1：只标当前应用）
   verify_after_action: true  # 动作后是否校验屏幕是否变化
   verify_delay_s: 0.5        # 动作后等待多久再截图对比（太快会把慢渲染误判为无变化）
   screenshot_diff_threshold: 0.002   # 变化像素占比低于此值视为「没反应」
