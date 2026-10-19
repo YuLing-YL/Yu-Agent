@@ -32,6 +32,9 @@ class FakePG:
         self.written = []
         self.keys = []
         self.hotkeys = []
+        self.clicks = []
+        self.moves = []
+        self.drags = []
 
     def write(self, text, interval=0.0):
         self.written.append(text)
@@ -45,10 +48,38 @@ class FakePG:
     def hotkey(self, *keys):
         self.hotkeys.append(tuple(keys))
 
+    def click(self, x, y, button="left", clicks=1):
+        self.clicks.append(("click", x, y, button, clicks))
+
+    def rightClick(self, x, y):
+        self.clicks.append(("right", x, y, "right", 1))
+
+    def doubleClick(self, x, y):
+        self.clicks.append(("double", x, y, "left", 2))
+
+    def middleClick(self, x, y):
+        self.clicks.append(("middle", x, y, "middle", 1))
+
+    def tripleClick(self, x, y):
+        self.clicks.append(("triple", x, y, "left", 3))
+
+    def moveTo(self, x, y, duration=0.0):
+        self.moves.append((x, y))
+
+    def dragTo(self, x, y, duration=0.0):
+        self.drags.append(("to", x, y))
+
+    def drag(self, dx, dy, duration=0.0):
+        self.drags.append(("by", dx, dy))
+
+    def size(self):
+        return (1512, 982)
+
 
 def make_executor():
     ex = ActionExecutor.__new__(ActionExecutor)  # 跳过 __init__，不碰真 pyautogui
     ex.pg = FakePG()
+    ex.type_interval = 0.02
     return ex
 
 
@@ -138,7 +169,55 @@ def test_real_clipboard_roundtrip():
             _clipboard_set(old)
 
 
+def test_all_mouse_buttons():
+    """左键/右键/双击/中键/三击 都要能执行（之前只有左/右/双击）。"""
+    ex = make_executor()
+    ex.execute(Action(type="click", x=100, y=200))
+    ex.execute(Action(type="right_click", x=110, y=210))
+    ex.execute(Action(type="double_click", x=120, y=220))
+    ex.execute(Action(type="middle_click", x=130, y=230))
+    ex.execute(Action(type="triple_click", x=140, y=240))
+    assert [c[0] for c in ex.pg.clicks] == ["click", "right", "double", "middle", "triple"], ex.pg.clicks
+    print("✓ 五种鼠标点击都能执行")
+
+
+def test_drag_absolute_and_relative():
+    """drag 优先用绝对目标 x2/y2（更好用），也兼容相对位移。"""
+    ex = make_executor()
+    ex.execute(Action(type="drag", x=100, y=100, x2=400, y2=300))
+    assert ex.pg.drags == [("to", 400, 300)], ex.pg.drags
+    ex.execute(Action(type="drag", x=100, y=100, args={"dx": 20, "dy": -10}))
+    assert ex.pg.drags[-1] == ("by", 20, -10), ex.pg.drags
+    print("✓ drag 支持绝对目标与相对位移")
+
+
+def test_drag_without_target_raises():
+    ex = make_executor()
+    try:
+        ex.execute(Action(type="drag", x=10, y=10))
+    except ActionError as e:
+        assert "x2" in str(e)
+        print("✓ drag 缺少目标会明确报错")
+        return
+    raise AssertionError("drag 没有目标应当报错")
+
+
+def test_drag_parser_maps_to_fields():
+    """模型写 x2/y2、to_x/to_y、{"to":{...}} 都要能解析成 Action.x2/y2。"""
+    from yu_agent.grounding.parser import parse_action
+
+    a = parse_action('{"type":"drag","x":1,"y":2,"x2":30,"y2":40}')
+    assert (a.x2, a.y2) == (30, 40), (a.x2, a.y2)
+    b = parse_action('{"type":"drag","x":1,"y":2,"to":{"x":50,"y":60}}')
+    assert (b.x2, b.y2) == (50, 60), (b.x2, b.y2)
+    print("✓ drag 目标点的多种写法都能解析")
+
+
 if __name__ == "__main__":
+    test_all_mouse_buttons()
+    test_drag_absolute_and_relative()
+    test_drag_without_target_raises()
+    test_drag_parser_maps_to_fields()
     test_ascii_uses_write()
     test_chinese_uses_clipboard_paste()
     test_mixed_text_uses_clipboard()

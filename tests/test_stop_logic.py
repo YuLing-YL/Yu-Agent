@@ -221,7 +221,8 @@ print(f"\n场景10(点输入框不输入): steps={st10.step} success={st10.succe
 print(f"  reason: {st10.reason}")
 assert st10.step == 3, f"同一目标点 3 次就该停，实际 {st10.step}"
 assert '"type": "type"' in prompts10[1], "第 2 步提示词必须明确要求输出 type"
-assert "还没有输入任何文字" in prompts10[1], "缺少『点了输入框还没输入』的提醒"
+# 默认提示词是英文（prompts.language=en）
+assert "You clicked the input field" in prompts10[1], "缺少『点了输入框还没输入』的提醒"
 assert not st10.success, "屏幕始终没变化，不该判定为任务完成（修复前是 ✅）"
 
 # ── 场景 11：正确的输入流程（click → type → enter）→ 正常完成 ──

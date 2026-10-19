@@ -34,7 +34,8 @@ class UIElement:
     w: float = 0.0
     h: float = 0.0
     app: str = ""             # 所属应用名（多应用枚举时用于提示模型）
-    kind: str = "app"         # "app" = 应用窗口内元素；"dock" = 程序坞图标
+    kind: str = "app"         # "app" = 应用窗口内元素；"dock" = 程序坞图标；"ocr" = OCR 识别到的文字
+    enabled: bool = True      # AXEnabled；False 表示禁用（点了也没用）
 
     @property
     def cx(self) -> float:
@@ -49,12 +50,20 @@ class UIElement:
         parts: List[str] = []
         if self.kind == "app" and self.app:
             parts.append(self.app)
-        parts.append(_ROLE_ZH.get(self.role, self.role))
+        role_map = _ROLE_EN if _LABEL_LANG == "en" else _ROLE_ZH
+        parts.append(role_map.get(self.role, self.role))
         if self.title:
             parts.append(self.title)
+        else:
+            # 没有任何标签的元素（图标按钮/自绘控件很常见）：告诉模型
+            # "这里有个能点的东西，但只能靠看截图判断是什么"
+            parts.append("(no label)" if _LABEL_LANG == "en" else "（无标签）")
         if self.description and self.description != self.title:
             parts.append(self.description)
-        return " | ".join(p for p in parts if p)
+        text = " | ".join(p for p in parts if p)
+        if not self.enabled:
+            text += " (disabled)" if _LABEL_LANG == "en" else "（当前不可用/灰色）"
+        return text
 
 
 # 可交互角色：这些才是用户会点击的东西
@@ -95,6 +104,16 @@ _ROLE_PRIORITY: Dict[str, int] = {
     "AXImage": 5, "AXStaticText": 6,
 }
 
+# 从这些子角色身上可以挖到「名字」（用于 _text_from_children）
+_TEXT_ROLES = {"AXStaticText", "AXTextField", "AXLink", "AXHeading", "AXImage"}
+
+# 这些角色经常是「行 → 单元格 → 文字」三层套娃，同一矩形只保留最值得点的一个
+_NESTED_ROLES = {"AXRow", "AXCell", "AXListItem", "AXOutlineRow", "AXColumn", "AXStaticText"}
+
+# 完全没标签的「图标类」元素：每个应用最多保留几个（工具栏/窗口装饰往往一大堆）
+_UNNAMED_ICON_ROLES = {"AXImage", "AXButton", "AXToolbarButton"}
+_UNNAMED_ICON_MAX = 8
+
 # 角色中文名（写进给模型的编号表，让模型更容易理解）
 _ROLE_ZH: Dict[str, str] = {
     "AXButton": "按钮", "AXLink": "链接", "AXMenuItem": "菜单项",
@@ -110,6 +129,36 @@ _ROLE_ZH: Dict[str, str] = {
     "AXDisclosureTriangle": "展开三角",
     "AXDockItem": "程序坞图标", "程序坞图标": "程序坞图标",
 }
+
+# 角色英文名（提示词语言为 en 时用这套，避免英文提示词里混中文角色词）
+_ROLE_EN: Dict[str, str] = {
+    "AXButton": "button", "AXLink": "link", "AXMenuItem": "menu item",
+    "AXRadioButton": "radio", "AXCheckBox": "checkbox", "AXSwitch": "switch",
+    "AXToggle": "toggle", "AXSegmentedControl": "segmented control",
+    "AXTextField": "text field", "AXTextArea": "text area", "AXSearchField": "search field",
+    "AXSecureTextField": "secure field", "AXSlider": "slider", "AXComboBox": "combo box",
+    "AXPopUpButton": "pop-up button", "AXMenuButton": "menu button",
+    "AXTabGroup": "tab group", "AXImage": "image",
+    "AXCell": "cell", "AXRow": "row", "AXStaticText": "text",
+    "AXMenuBarItem": "menu bar item", "AXToolbarButton": "toolbar button",
+    "AXIncrementor": "stepper", "AXStepper": "stepper", "AXColorWell": "color well",
+    "AXDisclosureTriangle": "disclosure", "程序坞图标": "dock icon",
+    "OCR文字": "text (OCR)",
+}
+
+# 标签语言（由 agent 按提示词语言设置；默认中文）
+_LABEL_LANG = "zh"
+
+
+def set_label_language(language: str) -> None:
+    """设置编号表里角色名的语言（"en" / "zh"）。"""
+    global _LABEL_LANG
+    _LABEL_LANG = "en" if str(language or "").strip().lower().startswith("en") else "zh"
+
+
+def label_language() -> str:
+    return _LABEL_LANG
+
 
 # 程序坞图标的 subrole -> 中文（图标本身没有标题时用它兜底）
 _DOCK_SUBROLE_ZH: Dict[str, str] = {
@@ -134,6 +183,10 @@ _EXCLUDED_PIDS: set = set()
 
 # 上一次枚举的诊断信息（供日志/排障使用）
 last_stats: Dict[str, Any] = {}
+
+# 程序坞状态：设为「自动隐藏」时，AX 报的坐标会落在屏幕下边缘之外，
+# 这些图标点了也点不到，只能丢掉并提示模型改用 cmd+space。
+_dock_state: Dict[str, Any] = {"hidden": False, "dropped": 0}
 
 # 单个元素面积超过屏幕的这个比例 → 视为背景/容器，不标记
 _MAX_AREA_FRACTION = 0.85
@@ -186,14 +239,35 @@ def _subrole_of(el) -> str:
 
 
 def _title_of(el) -> str:
-    """尽量拿到能描述这个元素用途的文字。"""
+    """尽量拿到能描述这个元素用途的文字。
+
+    通用回退链：AXTitle → AXDescription → AXValue → AXPlaceholderValue → AXHelp。
+    不同框架（Cocoa / AppKit / Electron / Qt / Java）把名字放在不同属性里，逐个试最稳。
+
+    注意**不要**用 AXRoleDescription 兜底：它只是角色名的本地化（"图像"/"按钮"），
+    拿它当名字会得到一堆叫「图像」的条目，比没名字更容易误导模型。
+    """
     for attr in ("AXTitle", "AXDescription", "AXValue", "AXPlaceholderValue", "AXHelp"):
         v, ok = _ax(el, attr)
         if ok and v is not None and str(v).strip():
             s = str(v).strip()
-            if s and s.lower() not in ("axvalue", "axdockey"):
-                return s[:80]
+            if not s or s.lower() in ("axvalue", "axdockey"):
+                continue
+            if len(s) > 60:
+                continue  # 超长多半是正文内容（文本框里的一整段），不是控件名
+            return s
     return ""
+
+
+def _enabled_of(el) -> bool:
+    """元素是否可用。禁用元素点了不会有反应，编号表里要标出来。"""
+    v, ok = _ax(el, "AXEnabled")
+    if not ok or v is None:
+        return True  # 读不到就当可用，别把正常元素误标成禁用
+    try:
+        return bool(v)
+    except Exception:
+        return True
 
 
 def _pos_size_of(el) -> Tuple[float, float, float, float]:
@@ -225,6 +299,44 @@ def _children_of(el) -> list:
         return list(v)
     except Exception:
         return []
+
+
+def _text_from_children(el, max_depth: int = 2, max_children: int = 12) -> str:
+    """元素自己没有标题时，从子元素里挖一个短文本当名字。
+
+    为什么需要：Finder（以及很多 AppKit 控件）的 `AXRow` / `AXCell` 自身
+    **AXTitle / AXDescription / AXValue 全为空**，文件名/文件夹名放在它的
+    子元素 `AXStaticText` 的 AXValue 里。不补这一步，编号表里就只剩
+    「单元格」「行」这种没有信息量的条目 —— 模型根本不知道哪一行是 code，
+    只能瞎点（实测连点同一个坐标 3 次）。
+    """
+    if max_depth <= 0:
+        return ""
+
+    def scan(node, depth: int) -> str:
+        if depth >= max_depth:
+            return ""
+        try:
+            kids = _children_of(node)[:max_children]
+        except Exception:
+            return ""
+        for k in kids:
+            role = _role_of(k)
+            if role in _TEXT_ROLES:
+                for attr in ("AXValue", "AXTitle", "AXDescription"):
+                    v, ok = _ax(k, attr)
+                    if not ok or v is None:
+                        continue
+                    s = str(v).strip()
+                    # 名字太长说明抓到的是正文，不是控件标签
+                    if s and len(s) <= 60 and s.lower() != "axvalue":
+                        return s
+            deeper = scan(k, depth + 1)
+            if deeper:
+                return deeper
+        return ""
+
+    return scan(el, 0)
 
 
 # ---------------------------------------------------------------------- #
@@ -375,6 +487,11 @@ def _walk(
         if role in _INTERACTIVE_ROLES:
             x, y, w, h = _pos_size_of(child)
             title = _title_of(child)
+            if not title:
+                # 通用兜底：自己没有标题的元素（列表行/单元格/图标按钮/自绘控件…
+                # 各种 App 都常见），从子元素里挖一个短文本当名字。
+                # 不这么做，编号表里就只剩「单元格」「行」这种没信息量的条目。
+                title = _text_from_children(child)
             if _useful(role, title, x, y, w, h, screen):
                 out.append(
                     UIElement(
@@ -384,6 +501,7 @@ def _walk(
                         x=x, y=y, w=w, h=h,
                         app=app_name,
                         kind="app",
+                        enabled=_enabled_of(child),
                     )
                 )
         _walk(child, out, depth + 1, limit, screen, app_name)
@@ -452,6 +570,20 @@ def _dock_pid() -> Optional[int]:
         return None
 
 
+def _split_offscreen(
+    elements: List[UIElement], screen_h: float
+) -> Tuple[List[UIElement], int]:
+    """把「整个落在屏幕下边缘之外」的元素挑出来。
+
+    主要用于程序坞：开了「自动隐藏」时，macOS 报的坐标在屏幕外，
+    这些图标既点不到也不该出现在编号表里。返回 (可见元素, 被丢弃数量)。
+    """
+    if not screen_h or not elements:
+        return list(elements), 0
+    visible = [el for el in elements if el.y < screen_h]
+    return visible, len(elements) - len(visible)
+
+
 def _dock_item_title(el, role: str) -> str:
     """程序坞图标的名字：先试常规属性，再用 subrole 兜底。"""
     t = _title_of(el)
@@ -513,7 +645,13 @@ def get_dock_elements(max_elements: int = 30) -> List[UIElement]:
 
     visit(dock, 0)
     out.sort(key=lambda el: el.x)
-    return out
+
+    # 程序坞设为自动隐藏时，AX 给出的是「藏在屏幕外」的位置（例如 y=987 > 屏高 982）。
+    # 这种图标点了也没有效果，干脆不入编号表，并记下状态让上层提示用 cmd+space。
+    visible, dropped = _split_offscreen(out, _screen_size()[1])
+    _dock_state["dropped"] = dropped
+    _dock_state["hidden"] = bool(out) and not visible
+    return visible
 
 
 # ---------------------------------------------------------------------- #
@@ -528,6 +666,98 @@ def _dedupe(elements: List[UIElement]) -> List[UIElement]:
         if key in seen:
             continue
         seen.add(key)
+        out.append(el)
+    return out
+
+
+def _contains(outer: UIElement, inner: UIElement, ratio: float = 0.85) -> bool:
+    """inner 是否（至少 ratio 比例）落在 outer 的矩形里。"""
+    area = inner.w * inner.h
+    if area <= 0:
+        return False
+    x0 = max(outer.x, inner.x)
+    y0 = max(outer.y, inner.y)
+    x1 = min(outer.x + outer.w, inner.x + inner.w)
+    y1 = min(outer.y + outer.h, inner.y + inner.h)
+    if x1 <= x0 or y1 <= y0:
+        return False
+    return ((x1 - x0) * (y1 - y0)) / area >= ratio
+
+
+def _dedupe_by_rect(elements: List[UIElement], tolerance: int = 3) -> List[UIElement]:
+    """把「同一块矩形上的套娃元素」合成一个。
+
+    很多框架都是「行 → 单元格 → 文字」三层套在同一位置（Finder 列表、Electron 列表、
+    网页表格……），三层都会被枚举到 → 同一个位置冒出 2~3 个编号，
+    模型看到一堆重复项，既浪费编号又容易点错。
+
+    两步：
+    1. 矩形完全相同（±3px）→ 只留最值得点的（按钮/输入框 > 行/单元格 > 纯文字）；
+    2. 文字被某个控件完整包住、且名字一致 → 丢掉文字（点文字和点控件是同一件事）。
+    """
+
+    def cell_key(el: UIElement):
+        return (
+            round(el.x / tolerance), round(el.y / tolerance),
+            round(el.w / tolerance), round(el.h / tolerance),
+        )
+
+    best: Dict[tuple, UIElement] = {}
+    order: List[tuple] = []
+    for el in elements:
+        k = cell_key(el)
+        cur = best.get(k)
+        if cur is None:
+            best[k] = el
+            order.append(k)
+            continue
+        # 只有「套娃型」角色之间才合并，普通按钮并排不算
+        if el.role not in _NESTED_ROLES and cur.role not in _NESTED_ROLES:
+            order.append(("keep", id(el)))
+            best[("keep", id(el))] = el
+            continue
+        new_score = (_ROLE_PRIORITY.get(el.role, 9), 0 if el.title else 1)
+        cur_score = (_ROLE_PRIORITY.get(cur.role, 9), 0 if cur.title else 1)
+        if new_score < cur_score:
+            best[k] = el
+
+    merged = [best[k] for k in order if k in best]
+
+    # 第二步：文字被控件包住就丢掉（避免「按钮」和它里面的「文字」各占一个编号）
+    out: List[UIElement] = []
+    for el in merged:
+        if el.role == "AXStaticText":
+            holder = next(
+                (
+                    o for o in merged
+                    if o is not el
+                    and o.role != "AXStaticText"
+                    and _contains(o, el)
+                    and (not o.title or not el.title or o.title == el.title)
+                ),
+                None,
+            )
+            if holder is not None:
+                continue
+        out.append(el)
+    return out
+
+
+def _cap_unnamed_icons(
+    elements: List[UIElement], budget: int = _UNNAMED_ICON_MAX
+) -> List[UIElement]:
+    """限制「完全没标签的图标」数量。
+
+    工具栏图标/窗口装饰往往一大堆、都没标签（AXImage / AXButton），
+    全标出来只会把真正有用的按钮挤出编号表。这条对所有应用通用。
+    """
+    left = budget
+    out: List[UIElement] = []
+    for el in elements:
+        if not el.title and el.role in _UNNAMED_ICON_ROLES:
+            if left <= 0:
+                continue
+            left -= 1
         out.append(el)
     return out
 
@@ -552,6 +782,7 @@ def _app_elements(
     raw: List[UIElement] = []
     _walk(app, raw, 0, max(limit * 6, 400), screen, app_name)
     raw = _dedupe(raw)
+    raw = _dedupe_by_rect(raw)  # 「行→单元格→文字」套娃合并成一个
 
     kept: List[UIElement] = []
     for el in raw:
@@ -563,7 +794,11 @@ def _app_elements(
 
     # 按角色优先级裁剪：输入框/按钮优先于装饰性文字
     kept.sort(key=lambda e: (_ROLE_PRIORITY.get(e.role, 9), e.w * e.h))
-    kept = kept[:limit]
+
+    # 完全没标签的图标（窗口装饰、工具栏图标）数量经常很多，
+    # 全标出来只会淹没模型：每个应用最多留 _UNNAMED_ICON_MAX 个。
+    kept = _cap_unnamed_icons(kept)[:limit]
+
     kept.sort(key=lambda e: (round(e.y / 12), e.x))
     return kept
 
@@ -596,6 +831,8 @@ def get_all_interactive_elements(
             order = [pid]
 
     dock = get_dock_elements(max(4, dock_max))
+    dock_hidden = bool(_dock_state.get("hidden"))
+    dock_dropped = int(_dock_state.get("dropped") or 0)
     app_budget = max(1, max_elements - len(dock))
 
     # 预算：前台应用拿一半，其余应用平分另一半。
@@ -650,6 +887,8 @@ def get_all_interactive_elements(
             "apps": per_app,
             "app_count": len(per_app),
             "dock_elements": len(dock),
+            "dock_hidden": dock_hidden,
+            "dock_dropped": dock_dropped,
             "total": len(elements),
             "calibration": calib,
         }

@@ -144,11 +144,15 @@ def _perceive(args) -> int:
     img = capture_screen()
     print(f"屏幕截图：{img.size[0]}x{img.size[1]}（逻辑像素）")
 
+    from .prompts.loader import prompt_language
+
+    lang = prompt_language()  # 与 agent 看到的编号表保持一致
     marked, mapping, _ = build_som_mapping(
         img,
         max_elements=args.max,
         dock_max=args.dock_max,
         max_apps=args.max_apps,
+        language=lang,
     )
     stats = dict(a11y_mod.last_stats)
 
@@ -157,8 +161,11 @@ def _perceive(args) -> int:
     for a in apps:
         print(f"  · {a.get('name')}（pid={a.get('pid')}）：{a.get('elements')} 个可点元素")
     print(f"  程序坞元素：{stats.get('dock_elements')} 个")
+    if stats.get("dock_hidden"):
+        print("  ⚠️ 程序坞是「自动隐藏」状态（图标在屏幕外），已排除；"
+              "agent 会用 cmd+space 打开应用")
     print(f"  坐标系校准：{stats.get('calibration')}")
-    print(f"  合计标记：{len(mapping)} 个\n")
+    print(f"  合计标记：{len(mapping)} 个（提示词语言：{lang}）\n")
 
     if not apps:
         print("⚠️ 没有识别到任何应用内元素！")

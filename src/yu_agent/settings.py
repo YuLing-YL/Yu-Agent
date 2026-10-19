@@ -47,6 +47,7 @@ class AgentConfig(BaseModel):
     max_total_clicks: int = 12  # 单个任务的点击总预算
     max_no_change_steps: int = 3  # 屏幕连续无变化多少次判定卡住
     max_plan_rejects: int = 2  # 重复拆分子任务多少次判定死循环并停止
+    type_interval_s: float = 0.02  # 逐字输入每个字符的间隔（只影响纯 ASCII；中文走粘贴）
     # ── 运行前清场：隐藏其它应用，减少屏幕上窗口太多造成的识别干扰 ──
     reset_desktop: bool = True
     reset_desktop_keep: List[str] = Field(default_factory=list)  # 额外保留、不要隐藏的应用名
@@ -62,6 +63,7 @@ class Settings:
         self.agent = AgentConfig(**raw.get("agent", {}))
         self.models: Dict[str, ModelConfig] = self._load_models(raw)
         self.loop = raw.get("loop", {})
+        self.prompts = raw.get("prompts", {})
         self.perception = raw.get("perception", {})
         self.grounding = raw.get("grounding", {})
         self.safety = raw.get("safety", {})

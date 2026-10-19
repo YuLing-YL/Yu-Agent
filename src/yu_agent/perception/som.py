@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .a11y import UIElement, get_all_interactive_elements
+from .a11y import UIElement, get_all_interactive_elements, label_language, set_label_language
 
 
 def _load_font(size: int):
@@ -93,8 +93,14 @@ def build_som_mapping(
     coord_scale: float = 1.0,
     dock_max: int = 30,
     max_apps: int = 6,
+    language: str = "",
 ) -> Tuple[Image.Image, Dict[int, UIElement], List[UIElement]]:
-    """完整流程：枚举元素 -> 画标记 -> 返回 (标记图, 映射, 元素列表)。"""
+    """完整流程：枚举元素 -> 画标记 -> 返回 (标记图, 映射, 元素列表)。
+
+    language: 编号表元素名的语言（"en" 时角色名用英文）。
+    """
+    if language:
+        set_label_language(language)
     elements = get_all_interactive_elements(
         max_elements, dock_max=dock_max, max_apps=max_apps
     )
@@ -102,37 +108,50 @@ def build_som_mapping(
     return marked, mapping, elements
 
 
-def describe_marks(mapping: Dict[int, UIElement]) -> str:
+def describe_marks(mapping: Dict[int, UIElement], language: str = "") -> str:
     """生成编号 -> 元素描述的文本，供 prompt 使用。
 
     按「哪个应用」分组：屏幕上有多个窗口时，模型必须知道每个编号属于谁，
     否则很容易点错窗口。程序坞图标单独一组排在最后。
+    language: "en" 时表头用英文。
     """
+    if language:
+        # 指定了语言就整表统一（表头 + 元素角色名），避免中英混排
+        set_label_language(language)
+    en = str(language or label_language()).strip().lower().startswith("en")
+    dock_key = "dock" if en else "程序坞"
     if not mapping:
-        return "（当前没有识别到可标记的元素）"
+        return "(no markable elements found)" if en else "（当前没有识别到可标记的元素）"
 
     # 先按分组统计编号区间，让模型一眼看出结构
     groups: List[Tuple[str, List[int]]] = []
     index: Dict[str, int] = {}
     for num in sorted(mapping.keys()):
         el = mapping[num]
-        key = "程序坞" if el.kind == "dock" else (el.app or "应用")
+        key = dock_key if el.kind == "dock" else (el.app or ("app" if en else "应用"))
         if key not in index:
             index[key] = len(groups)
             groups.append((key, []))
         groups[index[key]][1].append(num)
 
-    lines = [f"共 {len(mapping)} 个编号元素，按应用分组："]
+    if en:
+        lines = [f"{len(mapping)} numbered elements, grouped by app:"]
+    else:
+        lines = [f"共 {len(mapping)} 个编号元素，按应用分组："]
     for name, nums in groups:
         span = f"#{nums[0]}~#{nums[-1]}" if len(nums) > 1 else f"#{nums[0]}"
-        if name == "程序坞":
-            lines.append(f"【程序坞】{span}（屏幕底部图标，仅在需要打开/切换应用时用）")
+        if name == dock_key:
+            lines.append(
+                f"[dock] {span} (app icons at the bottom; click only to open/switch apps)"
+                if en else f"【程序坞】{span}（屏幕底部图标，仅在需要打开/切换应用时用）"
+            )
         else:
-            lines.append(f"【{name}】{span}（{len(nums)} 个）")
+            lines.append(f"[{name}] {span} ({len(nums)})" if en else f"【{name}】{span}（{len(nums)} 个）")
     lines.append("")
 
     for num in sorted(mapping.keys()):
         el = mapping[num]
         label = el.label()
-        lines.append(f"#{num}: {label}" if label else f"#{num}: （无标题元素）")
+        empty = "(no title)" if en else "（无标题元素）"
+        lines.append(f"#{num}: {label}" if label else f"#{num}: {empty}")
     return "\n".join(lines)

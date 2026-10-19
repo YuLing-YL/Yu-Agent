@@ -57,12 +57,14 @@ _KEY_ALIASES = {
 class ActionExecutor:
     """基于 pyautogui 的动作执行。"""
 
-    def __init__(self, fail_safe: bool = True, pause: float = 0.05):
+    def __init__(self, fail_safe: bool = True, pause: float = 0.05, type_interval: float = 0.02):
         import pyautogui
 
         self.pg = pyautogui
         self.pg.FAILSAFE = fail_safe  # 鼠标移到屏幕左上角可紧急中止
         self.pg.PAUSE = pause
+        # 逐字输入时每个字符的间隔（只影响纯 ASCII；中文走剪贴板粘贴，不适用）
+        self.type_interval = max(0.0, float(type_interval))
 
     def execute(self, action: Action) -> None:
         """执行单个动作。"""
@@ -71,12 +73,18 @@ class ActionExecutor:
             if t == "click":
                 self._require_coords(action)
                 self.pg.click(action.x, action.y)
-            elif t == "double_click":
-                self._require_coords(action)
-                self.pg.doubleClick(action.x, action.y)
             elif t == "right_click":
                 self._require_coords(action)
                 self.pg.rightClick(action.x, action.y)
+            elif t == "double_click":
+                self._require_coords(action)
+                self.pg.doubleClick(action.x, action.y)
+            elif t == "middle_click":
+                self._require_coords(action)
+                self.pg.middleClick(action.x, action.y)
+            elif t == "triple_click":
+                self._require_coords(action)
+                self.pg.tripleClick(action.x, action.y)
             elif t == "type":
                 if action.text is None:
                     raise ActionError("type 动作缺少 text 字段")
@@ -89,10 +97,7 @@ class ActionExecutor:
                 self._require_coords(action)
                 self.pg.moveTo(action.x, action.y, duration=action.duration)
             elif t == "drag":
-                self._require_coords(action)
-                dx = action.args.get("dx", 0)
-                dy = action.args.get("dy", 0)
-                self.pg.drag(dx, dy, duration=action.duration)
+                self._drag(action)
             elif t == "wait":
                 time.sleep(min(action.duration, 10.0))
             elif t in ("done", "finish", "finished"):
@@ -117,9 +122,26 @@ class ActionExecutor:
         if not text:
             return
         if _is_ascii(text):
-            self.pg.write(text, interval=0.02)
+            self.pg.write(text, interval=self.type_interval)
             return
         self._paste_text(text)
+
+    def _drag(self, action: Action) -> None:
+        """拖拽。优先用绝对目标 (x2, y2)；也兼容相对位移 args.dx/dy。"""
+        self._require_coords(action)
+        x2 = action.x2 if action.x2 is not None else action.args.get("x2")
+        y2 = action.y2 if action.y2 is not None else action.args.get("y2")
+        if x2 is not None and y2 is not None:
+            self.pg.moveTo(action.x, action.y)
+            self.pg.dragTo(int(x2), int(y2), duration=max(0.1, action.duration))
+            log.info("拖拽 (%s,%s) → (%s,%s)", action.x, action.y, x2, y2)
+            return
+        dx = int(action.args.get("dx", 0) or 0)
+        dy = int(action.args.get("dy", 0) or 0)
+        if not dx and not dy:
+            raise ActionError("drag 动作需要 x2/y2（绝对目标）或 args.dx/dy（相对位移）")
+        self.pg.drag(dx, dy, duration=max(0.1, action.duration))
+        log.info("拖拽相对位移 (%s,%s) → +(%s,%s)", action.x, action.y, dx, dy)
 
     def _paste_text(self, text: str) -> None:
         """用剪贴板 + ⌘V 粘贴文字（支持中文）。会临时借用剪贴板，之后还原。"""

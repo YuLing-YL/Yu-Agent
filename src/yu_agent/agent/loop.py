@@ -40,6 +40,7 @@ from ..memory import MemoryManager
 from ..perception import a11y as a11y_mod
 from ..perception.screenshot import capture_screen, get_screen_size, region_to_pixel
 from ..perception.som import build_som_mapping, describe_marks
+from ..prompts.loader import prompt_language
 from ..safety.policy import check_action_allowed, detect_injection, sanitize_context
 from ..skills.registry import SkillRegistry
 from .planner import Planner
@@ -48,7 +49,7 @@ from .state import AgentState
 log = get_logger("yu_agent.loop")
 
 # 会被判定为「点击」的动作类型（防重复的重点对象）
-_CLICK_TYPES = {"click", "double_click", "right_click"}
+_CLICK_TYPES = {"click", "double_click", "right_click", "middle_click", "triple_click"}
 # 坐标量化网格（逻辑像素）：把相邻几像素的点击视为「同一个目标」
 _COORD_GRID = 20
 # 「可以输入文字」的角色（点了它们之后，下一步应该是 type 而不是再点一次）
@@ -132,7 +133,10 @@ class AgentLoop:
         self.dry_run = dry_run
         self.callback = callback  # 用于 GUI 实时反馈
 
-        self.executor = ActionExecutor()
+        # type_interval_s：纯 ASCII 逐字输入的间隔（中文走剪贴板，不受影响）
+        self.executor = ActionExecutor(
+            type_interval=float(self.cfg.get("type_interval_s", 0.02))
+        )
         self.planner = Planner(backend, skill_registry)
         self.resolver = GroundingResolver()
         self.state = AgentState()
@@ -173,7 +177,13 @@ class AgentLoop:
             # 清场模式：只标记「当前最前面的应用 + 程序坞」，背景应用的按钮一个都不标。
             # 这是不依赖任何权限的兜底——即使系统不允许隐藏窗口，屏幕再乱也不会干扰识别。
             self.som_max_apps = 1
+        # 提示词语言（en/zh）：决定系统提示词与运行期提示用哪种语言
+        self.prompt_lang = str(self.cfg.get("prompt_language") or "").strip() or prompt_language()
         self._user_stopped = False
+
+    def _t(self, zh: str, en: str) -> str:
+        """运行期提示按提示词语言二选一。"""
+        return en if self.prompt_lang.lower().startswith("en") else zh
 
     # ------------------------------------------------------------------ #
     # 主循环
@@ -243,9 +253,10 @@ class AgentLoop:
                                 coord_scale=img_scale,
                                 dock_max=self.som_dock_max,
                                 max_apps=self.som_max_apps,
+                                language=self.prompt_lang,
                             )
                             obs_img = marked_img
-                            marks_desc = describe_marks(marks_map)
+                            marks_desc = describe_marks(marks_map, self.prompt_lang)
                             a11y_stats = dict(a11y_mod.last_stats)
                             apps = a11y_stats.get("apps") or []
                             apps_desc = "、".join(
@@ -277,8 +288,13 @@ class AgentLoop:
                     data_url = image_to_data_url(obs_img)
 
                     # 2. recall：召回记忆上下文（隔离为不可信内容）
-                    mem_ctx = sanitize_context(self.memory.recall_context(task))
-                    work_ctx = sanitize_context(self.memory.working.context_for_prompt())
+                    mem_ctx = sanitize_context(
+                        self.memory.recall_context(task), self.prompt_lang
+                    )
+                    work_ctx = sanitize_context(
+                        self.memory.working.context_for_prompt(self.prompt_lang),
+                        self.prompt_lang,
+                    )
 
                     # 2.5 提示词组装（顺序 = 重要度递增，模型最后看到的最强）：
                     #     子任务计划 → 最近动作 → 输入提醒 → 感知异常
@@ -310,6 +326,7 @@ class AgentLoop:
                         marks=marks_map,
                         marks_desc=marks_desc,
                         extra_hint=progress_hint,
+                        language=self.prompt_lang,
                     )
 
                     # 用户可能在模型思考期间点了停止 → 丢弃本步动作，不要执行
@@ -756,21 +773,35 @@ class AgentLoop:
         parts: List[str] = []
         if recent:
             parts.append(
-                "【系统记录：本任务最近的实际操作（请勿重复做同样的事）】\n"
+                self._t(
+                    "【系统记录：本任务最近的实际操作（请勿重复做同样的事）】\n",
+                    "[System log: what you actually did recently (do NOT repeat these)]\n",
+                )
                 + "\n".join(recent)
             )
         if repeat_count >= 2:
             parts.append(
-                f"【系统警告】你已经连续 {repeat_count} 次执行完全相同的动作，"
-                "这几乎一定说明任务已经完成、或者这个动作完全无效。"
-                "请立即停止重复它：如果目标已达成，直接输出 "
-                '{"type": "done", "reason": "已完成"}；'
-                "如果还没达成，必须换一种完全不同的方式。"
+                self._t(
+                    f"【系统警告】你已经连续 {repeat_count} 次执行完全相同的动作，"
+                    "这几乎一定说明任务已经完成、或者这个动作完全无效。"
+                    "请立即停止重复它：如果目标已达成，直接输出 "
+                    '{"type": "done", "reason": "已完成"}；'
+                    "如果还没达成，必须换一种完全不同的方式。",
+                    f"[System warning] You have repeated the exact same action {repeat_count} times. "
+                    "That almost always means the goal is already achieved or the action does "
+                    "nothing. Stop repeating it: if the goal is achieved output "
+                    '{"type": "done", "reason": "done"}; otherwise try a completely different approach.',
+                )
             )
         if no_change_count >= 1:
             parts.append(
-                f"【系统提示】上一步操作后屏幕没有任何变化（已连续 {no_change_count} 次），"
-                "说明这个操作没有生效，或任务其实已经完成了。请不要再重复它。"
+                self._t(
+                    f"【系统提示】上一步操作后屏幕没有任何变化（已连续 {no_change_count} 次），"
+                    "说明这个操作没有生效，或任务其实已经完成了。请不要再重复它。",
+                    f"[System note] The screen did not change after your last action "
+                    f"({no_change_count} in a row). The action had no effect, or the task is "
+                    "already done. Do not repeat it.",
+                )
             )
         return "\n\n".join(parts)
 
@@ -809,20 +840,32 @@ class AgentLoop:
         if not subs:
             return ""
         idx = max(0, min(self.state.current_subtask, len(subs) - 1))
-        lines = ["【子任务计划（系统已确认，禁止再次拆分）】"]
+        lines = [
+            self._t(
+                "【子任务计划（系统已确认，禁止再次拆分）】",
+                "[Subtask plan (confirmed by the system — do NOT decompose again)]",
+            )
+        ]
         for i, s in enumerate(subs):
             if i < idx:
-                mark = "✅ 已完成"
+                mark = self._t("✅ 已完成", "DONE")
             elif i == idx:
-                mark = "→ 当前执行"
+                mark = self._t("→ 当前执行", "CURRENT")
             else:
-                mark = "待执行"
-            lines.append(f"  [{i + 1}/{len(subs)}] {mark}：{s}")
+                mark = self._t("待执行", "pending")
+            sep = "：" if not self.prompt_lang.lower().startswith("en") else ": "
+            lines.append(f"  [{i + 1}/{len(subs)}] {mark}{sep}{s}")
         lines.append(
-            f"现在请只输出「完成当前子任务」所需的**一个具体动作**"
-            f"（click / type / key / scroll / skill 等）。"
-            f"**禁止再输出 plan**（会被系统直接忽略并记违规）；"
-            f"只有当前子任务确实完成了，才输出 subtask_done 推进到下一个。"
+            self._t(
+                f"现在请只输出「完成当前子任务」所需的**一个具体动作**"
+                f"（click / type / key / scroll / skill 等）。"
+                f"**禁止再输出 plan**（会被系统直接忽略并记违规）；"
+                f"只有当前子任务确实完成了，才输出 subtask_done 推进到下一个。",
+                "Now output **one concrete action** that advances the CURRENT subtask "
+                "(click / type / key / scroll / skill). **Do not output plan again** — it is "
+                "ignored and counted as a violation. Only output subtask_done when the current "
+                "subtask is really finished.",
+            )
         )
         return "\n".join(lines)
 
@@ -878,20 +921,41 @@ class AgentLoop:
         r = self._clean_report
         if step > 1 or r is None:
             return ""
-        lines = ["【清场模式】本轮只标记「当前最前面的应用 + 程序坞」，背景应用的按钮不会被标记。"]
+        lines = [
+            self._t(
+                "【清场模式】本轮只标记「当前最前面的应用 + 程序坞」，背景应用的按钮不会被标记。",
+                "[Clean-screen mode] Only the frontmost app + the dock are marked this task; "
+                "buttons of background apps are not marked.",
+            )
+        ]
         if r.hidden:
             kept = f"（保留：{'、'.join(r.kept[:4])}）" if r.kept else ""
             lines.append(
-                f"任务开始前已隐藏其它 {len(r.hidden)} 个应用{kept}，"
-                f"它们只是被隐藏、没有关闭也没有丢状态，点程序坞图标就能原样恢复。"
+                self._t(
+                    f"任务开始前已隐藏其它 {len(r.hidden)} 个应用{kept}，"
+                    f"它们只是被隐藏、没有关闭也没有丢状态，点程序坞图标就能原样恢复。",
+                    f"{len(r.hidden)} other apps were hidden before the task started. They were only "
+                    f"hidden — not closed, no state lost — click their dock icon to restore them.",
+                )
             )
         elif r.error:
-            lines.append(f"（隐藏其它应用失败：{r.error}）")
+            lines.append(
+                self._t(f"（隐藏其它应用失败：{r.error}）", f"(hiding other apps failed: {r.error})")
+            )
         else:
-            lines.append("（系统不允许隐藏其它应用的窗口，所以没有动它们。）")
+            lines.append(
+                self._t(
+                    "（系统不允许隐藏其它应用的窗口，所以没有动它们。）",
+                    "(macOS does not allow hiding other apps here, so they were left untouched.)",
+                )
+            )
         lines.append(
-            "如果你要操作的应用**现在不在前台**，请先点程序坞里它的图标把它调到前台，"
-            "下一步它的界面控件才会被标记出来。不要凭记忆去点别的窗口。"
+            self._t(
+                "如果你要操作的应用**现在不在前台**，请先点程序坞里它的图标把它调到前台，"
+                "下一步它的界面控件才会被标记出来。不要凭记忆去点别的窗口。",
+                "If the app you need is **not in the foreground**, click its icon in the dock first; "
+                "its controls are marked from the next step on. Do not click other windows from memory.",
+            )
         )
         return "\n".join(lines)
 
@@ -903,13 +967,19 @@ class AgentLoop:
         """
         if not self._pending_input:
             return ""
-        return (
+        return self._t(
             f"【系统提示】你上一步已经点击了输入框「{self._pending_input}」，"
             f"但**现在还没有输入任何文字**。输入框只需点一次，它已经聚焦了。\n"
             f'下一步**必须**输出：{{"type": "type", "text": "你要输入的内容"}}，'
             f"把文字打进去（`type` 不需要坐标或编号，直接输到当前焦点）。\n"
             f'输入完成后，如果需要提交，再输出 {{"type": "key", "key": "enter"}}。\n'
-            f"**绝对不要再次点击这个输入框**——那不会输入任何东西。"
+            f"**绝对不要再次点击这个输入框**——那不会输入任何东西。",
+            f'[System note] You clicked the input field "{self._pending_input}" but have NOT typed '
+            f"anything yet. The field only needs one click and it is already focused.\n"
+            f'The next action MUST be {{"type": "type", "text": "the text to enter"}} '
+            f"(`type` needs no coordinates or mark; it goes to the focused field).\n"
+            f'When done, submit with {{"type": "key", "key": "enter"}} if needed.\n'
+            f"**Never click that input field again** — it types nothing.",
         )
 
     def _build_perception_warning(
@@ -924,18 +994,38 @@ class AgentLoop:
             app_count = sum(int(a.get("elements") or 0) for a in a11y_stats["apps"])
         dock_count = a11y_stats.get("dock_elements") or 0
 
+        if a11y_stats.get("dock_hidden"):
+            # 程序坞开了「自动隐藏」：图标在屏幕外，点了也没用
+            return self._t(
+                "【系统提示】程序坞当前是「自动隐藏」状态，图标在屏幕外，点了没有反应，"
+                "所以没有把它们放进编号表。\n"
+                "要打开某个应用，请用键盘：先按 cmd+space 打开聚焦搜索（Spotlight），"
+                '然后下一步用 type 输入应用名，再按 enter 回车启动。',
+                "[System note] The dock is set to auto-hide: its icons are off-screen and clicking "
+                "them does nothing, so they were left out of the element list.\n"
+                "To open an app, use the keyboard instead: press cmd+space to open Spotlight, then "
+                "`type` the app name on the next step and press enter to launch it.",
+            )
+
         if marks_map and not app_count and dock_count:
-            return (
+            return self._t(
                 "【系统提示】当前只识别到了屏幕底部的「程序坞图标」，"
                 "没能识别到任何窗口内的按钮/输入框。"
                 "这通常是因为目标应用没有授予「辅助功能」权限（系统设置 → 隐私与安全性 → 辅助功能）。"
                 "请不要去点程序坞图标；如果目标应用已经打开，改用键盘操作"
-                "（例如浏览器用 cmd+l 聚焦地址栏再输入）。"
+                "（例如浏览器用 cmd+l 聚焦地址栏再输入）。",
+                "[System note] Only dock icons were detected — no buttons or input fields inside any "
+                "window. This usually means the target app lacks Accessibility permission "
+                "(System Settings → Privacy & Security → Accessibility). Do not click dock icons; "
+                "if the app is already open, use the keyboard instead "
+                "(e.g. cmd+l to focus the browser address bar, then type).",
             )
         if not marks_map:
-            return (
+            return self._t(
                 "【系统提示】当前没有识别到任何可标记元素，请使用像素坐标，"
-                "并且操作后注意观察屏幕是否真的变化了。"
+                "并且操作后注意观察屏幕是否真的变化了。",
+                "[System note] No markable elements were detected. Use pixel coordinates and check "
+                "whether the screen actually changed after each action.",
             )
         return ""
 

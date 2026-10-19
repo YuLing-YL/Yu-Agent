@@ -347,11 +347,17 @@ def test_describe_marks_grouped() -> None:
         3: UIElement(id=2, role="程序坞图标", title="访达", x=0, y=0, w=20, h=20,
                      app="程序坞", kind="dock"),
     }
-    text = describe_marks(mp)
+    text = describe_marks(mp, "zh")
     assert "【Safari】#1~#2" in text, text
     assert "【程序坞】#3" in text, text
     assert "Safari | 按钮 | 后退" in text, text
-    print("✓ 编号表按应用分组，并带上所属应用名")
+
+    # 英文模式下表头与角色名都要变成英文
+    en_text = describe_marks(mp, "en")
+    assert "[Safari] #1~#2" in en_text, en_text
+    assert "[dock] #3" in en_text, en_text
+    assert "Safari | button | 后退" in en_text, en_text
+    print("✓ 编号表按应用分组，中英文表头都正确")
 
 
 
@@ -389,12 +395,35 @@ def test_som_scale_and_snap() -> None:
     print("✓ 远离元素时不吸附")
 
 
+def test_prompt_language() -> None:
+    """提示词语言切换：en 用 system.en.md，zh 用 system.md，占位符都要能渲染。"""
+    from yu_agent.actions.schema import describe_actions
+    from yu_agent.prompts.loader import load_prompt, prompt_file, render_prompt
+    from yu_agent.skills import build_default_registry
+
+    skills = build_default_registry().describe_for_prompt()
+
+    en = render_prompt("system", language="en", actions=describe_actions("en"), skills=skills)
+    zh = render_prompt("system", language="zh", actions=describe_actions("zh"), skills=skills)
+
+    assert "You are Yu-Agent" in en, en[:80]
+    assert "你是 Yu-Agent" in zh, zh[:80]
+    assert "{actions}" not in en and "{skills}" not in en
+    assert "{actions}" not in zh and "{skills}" not in zh
+    assert prompt_file("system", "en") == "system.en.md"
+    assert prompt_file("system", "zh") == "system.md"
+    assert load_prompt("system", "en") != load_prompt("system", "zh")
+    assert describe_actions("en").startswith("- click: left click")
+    print("✓ 提示词语言可切换（en / zh），占位符渲染正常")
+
+
 if __name__ == "__main__":
     test_imports()
     test_coord_mapping()
     test_responder()
     test_memory()
     test_saved_models()
+    test_prompt_language()
     test_a11y_container_traversal()
     test_som_scale_and_snap()
     test_dock_not_truncated()

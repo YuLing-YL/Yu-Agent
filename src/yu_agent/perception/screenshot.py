@@ -2,12 +2,20 @@
 from __future__ import annotations
 
 import sys
+import time
 from dataclasses import dataclass
 from typing import Tuple
 
 from PIL import Image
 
 from ..common.errors import EnvError
+from ..common.logging import get_logger
+
+log = get_logger("yu_agent.screenshot")
+
+# 正常截屏 < 0.3s。超过这个秒数说明系统侧被阻塞（屏幕锁定 / 显示器休眠 / 录屏被限流），
+# 打一条明确的警告，免得用户以为 agent 卡死了。
+_SLOW_CAPTURE_S = 3.0
 
 
 @dataclass
@@ -43,10 +51,18 @@ def capture_screen() -> Image.Image:
     重要：返回的是「逻辑像素 1:1」的图像，与 pyautogui.click() 的坐标系一致。
     这样模型看到的图坐标 == 实际点击坐标，避免 Retina 屏 / 缩放导致的偏移。
     """
+    started = time.time()
+    img = None
     if sys.platform == "darwin":
         img = _capture_macos()
-        if img is not None:
-            return img
+    elapsed = time.time() - started
+    if elapsed >= _SLOW_CAPTURE_S:
+        log.warning(
+            "截屏耗时 %.1fs（异常）：通常是屏幕已锁定/显示器休眠/录屏权限受限。"
+            "锁屏期间模拟点击也会失效。", elapsed,
+        )
+    if img is not None:
+        return img
     # 通用路径：pyautogui（screenshot() 返回的就是逻辑像素 1:1）
     try:
         import pyautogui

@@ -13,6 +13,7 @@ agent:
   max_total_clicks: 12         # 单个任务点击总预算，超过即自动停止
   max_no_change_steps: 3       # 屏幕连续无变化多少次判定卡住并自动停止
   max_plan_rejects: 2          # 反复「拆分子任务」却不执行任何操作多少次判定死循环并停止
+  type_interval_s: 0.02        # 逐字输入时每个字符的间隔（只影响 ASCII；中文走剪贴板粘贴）
   # ── 运行前清场（推荐开启）──
   # 任务开始前把其它应用隐藏（⌘H 语义，不退出不关窗），屏幕上只剩桌面 + 程序坞，
   # 这样 SOM 编号表不会被一堆背景窗口的按钮淹没。点程序坞图标即可恢复原窗口。
@@ -20,6 +21,11 @@ agent:
   reset_desktop_keep: []       # 额外不想被隐藏的应用名，如 ["微信", "终端"]
   stop_on_grounding_error: true   # 定位失败时是否直接终止（false 则交给反思重试）
   dry_run: false             # true = 只规划不执行（安全调试）
+
+prompts:
+  # 提示词语言：en = 英文（默认，token 更省、指令遵循通常更稳）；zh = 中文
+  # 对应文件：en → src/yu_agent/prompts/system.en.md，zh → system.md
+  language: en
 
 loop:
   history_window: 8          # 塞进 prompt 的最近步数

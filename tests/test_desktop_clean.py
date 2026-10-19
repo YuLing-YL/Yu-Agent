@@ -178,8 +178,9 @@ def test_loop_reset_mode_narrows_to_frontmost():
 
     assert lp.som_max_apps == 1, f"清场模式应只标当前应用，实际 {lp.som_max_apps}"
     assert calls and calls[0]["task"] == "打开浏览器搜索天气"
-    assert "清场模式" in prompts[0], "首步提示词必须说明清场模式"
-    assert "微信" in prompts[0] or "隐藏" in prompts[0]
+    # 默认提示词语言是英文（prompts.language=en）
+    assert "Clean-screen mode" in prompts[0], "首步提示词必须说明清场模式"
+    assert "hidden" in prompts[0], "首步提示词要说明已经隐藏了哪些应用"
     assert st.step == 1
     print(f"✓ 清场模式生效：som_max_apps={lp.som_max_apps}，首步有说明")
 

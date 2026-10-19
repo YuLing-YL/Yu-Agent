@@ -50,25 +50,45 @@ class WorkingMemory:
         if len(self.steps) > self.max_recent_steps:
             self.steps = self.steps[-self.max_recent_steps :]
 
-    def context_for_prompt(self) -> str:
-        """生成注入 prompt 的短时上下文（文本 + 可选最近截图）。"""
+    def context_for_prompt(self, language: str = "") -> str:
+        """生成注入 prompt 的短时上下文（文本 + 可选最近截图）。
+
+        language: 提示词语言（"en" 时用英文标签，任务内容本身保持原样）
+        """
+        en = str(language or "").strip().lower().startswith("en")
         parts: List[str] = []
         if self.goal:
-            parts.append(f"任务目标：{self.goal}")
+            parts.append(f"Goal: {self.goal}" if en else f"任务目标：{self.goal}")
         if self.subtasks:
-            parts.append("子任务计划：")
+            parts.append("Subtask plan:" if en else "子任务计划：")
             for i, st in enumerate(self.subtasks):
-                mark = "→ 当前" if i == self.current_subtask else "   "
-                done = "✅" if i < self.current_subtask else ""
-                parts.append(f"  {mark} [{i+1}] {st} {done}")
+                if i < self.current_subtask:
+                    mark = "   "
+                    done = " (done)"
+                elif i == self.current_subtask:
+                    mark = "-> current"
+                    done = ""
+                else:
+                    mark = "   "
+                    done = ""
+                if not en:
+                    mark = "→ 当前" if i == self.current_subtask else "   "
+                    done = "✅" if i < self.current_subtask else ""
+                parts.append(f"  {mark} [{i+1}] {st}{done}")
 
         recent = self.steps[-self.max_recent_steps :]
         if recent:
-            parts.append("最近步骤：")
+            parts.append("Recent steps:" if en else "最近步骤：")
             for s in recent:
-                parts.append(
-                    f"  步骤{s.step}: 界面={s.observation_summary} | 动作={s.action} | 结果={s.result}"
-                )
+                if en:
+                    parts.append(
+                        f"  step {s.step}: screen={s.observation_summary} | "
+                        f"action={s.action} | result={s.result}"
+                    )
+                else:
+                    parts.append(
+                        f"  步骤{s.step}: 界面={s.observation_summary} | 动作={s.action} | 结果={s.result}"
+                    )
         return "\n".join(parts)
 
     def recent_screenshots(self) -> List[str]:

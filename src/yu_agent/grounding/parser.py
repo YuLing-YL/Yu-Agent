@@ -85,10 +85,17 @@ def _to_action(data: Dict[str, Any]) -> Action:
         data.setdefault("x", data["coordinate"][0])
         data.setdefault("y", data["coordinate"][1])
 
+    # drag 的终点：兼容 x2/y2、to_x/to_y、以及 {"to": {"x":..,"y":..}}
+    endpoint = data.get("to") if isinstance(data.get("to"), dict) else {}
+    x2 = data.get("x2", data.get("to_x", endpoint.get("x")))
+    y2 = data.get("y2", data.get("to_y", endpoint.get("y")))
+
     return Action(
         type=str(data.get("type", data.get("action", ""))).lower(),
         x=_opt_int(data.get("x")),
         y=_opt_int(data.get("y")),
+        x2=_opt_int(x2),
+        y2=_opt_int(y2),
         mark=_opt_int(data.get("mark", data.get("id", data.get("index")))),
         text=data.get("text"),
         key=data.get("key"),
