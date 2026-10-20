@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 
 
@@ -18,8 +17,12 @@ def main(argv=None) -> int:
     p_run.add_argument("task", help="任务描述")
     p_run.add_argument("--dry-run", action="store_true", help="只规划不执行")
     p_run.add_argument(
-        "--no-reset", action="store_true",
-        help="本次不清场（不隐藏其它应用，也照常枚举所有可见应用）",
+        "--som-mode", choices=["marks", "coords", "off"], default=None,
+        help="本次标注模式：marks=编号标注（默认）/ coords=纯坐标 / off=不标注",
+    )
+    p_run.add_argument(
+        "--all-apps", action="store_true",
+        help="本次标注屏幕上所有可见应用（默认只标最前面的应用 + 程序坞）",
     )
 
     # test：离线测试闭环（无需 API / 屏幕）
@@ -36,12 +39,11 @@ def main(argv=None) -> int:
         help="感知自检：截屏 + 列出识别到的可点击元素（不需要 API）",
     )
     p_per.add_argument("--output", "-o", default="", help="标记图输出路径")
-    p_per.add_argument("--max", type=int, default=120, help="最多标记多少个元素")
-    p_per.add_argument("--dock-max", type=int, default=30, help="程序坞最多标记几个图标")
-    p_per.add_argument("--max-apps", type=int, default=6, help="最多枚举几个可见应用")
+    p_per.add_argument("--max", type=int, default=60, help="最多标记多少个元素")
+    p_per.add_argument("--dock-max", type=int, default=20, help="程序坞最多标记几个图标")
     p_per.add_argument(
-        "--clean", action="store_true",
-        help="先清场（尽力隐藏其它应用）并只标当前应用，预览 agent 实际看到的效果",
+        "--max-apps", type=int, default=1,
+        help="最多枚举几个可见应用（默认 1 = 只标最前面的应用）",
     )
 
     # logs：查看日志文件位置 / 末尾内容
@@ -80,11 +82,15 @@ def _run(args) -> int:
     from .settings import get_settings
 
     agent = YuAgent(dry_run=args.dry_run)
-    if getattr(args, "no_reset", False):
-        # 本次关闭清场：恢复「枚举所有可见应用」的行为
-        agent.loop.reset_desktop = False
+    # 本次运行的标注模式（命令行优先于配置）
+    mode = getattr(args, "som_mode", None)
+    if mode:
+        agent.loop.som_mode = mode
+    if getattr(args, "all_apps", False):
+        # 本次放开「只标当前窗口」：枚举屏幕上所有可见应用
+        agent.loop.som_frontmost_only = False
         agent.loop.som_max_apps = int(get_settings().loop.get("som_max_apps", 6))
-        print("已关闭清场：本次不隐藏其它应用，照常枚举所有可见应用")
+        print("本次标注所有可见应用（不再只标当前窗口）")
     state = agent.run(args.task)
     print(f"\n结果：success={state.success}，步骤={state.step}，原因={state.reason}")
     agent.close()
@@ -133,16 +139,9 @@ def _perceive(args) -> int:
     from .perception.screenshot import capture_screen
     from .perception.som import build_som_mapping
 
-    if getattr(args, "clean", False):
-        # 和 agent 的「清场模式」完全一致：先尽力隐藏其它应用，再只标当前应用 + 程序坞
-        from .actions.desktop import clean_desktop
-
-        report = clean_desktop(task="", keep=[], exclude_pids=[os.getpid()])
-        print(f"清场：{report.summary()}")
-        args.max_apps = 1
-
     img = capture_screen()
     print(f"屏幕截图：{img.size[0]}x{img.size[1]}（逻辑像素）")
+    print(f"标注范围：{'全部可见应用' if args.max_apps > 1 else '只标最前面的应用 + 程序坞'}\n")
 
     from .prompts.loader import prompt_language
 

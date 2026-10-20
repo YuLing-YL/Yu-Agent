@@ -127,16 +127,31 @@ class MainWindow(QMainWindow):
 
         btn_row.addStretch()
 
-        # 运行前清空桌面：隐藏其它应用，减少识别干扰（⌘H 语义，不关窗）
-        self.reset_desktop_cb = QCheckBox("运行前清空桌面")
-        self.reset_desktop_cb.setToolTip(
-            "任务开始前把其它应用隐藏（⌘H，不退出、不关窗），并且只标记「当前应用 + 程序坞」，\n"
-            "背景应用的按钮不会再混进编号表。点程序坞图标即可恢复被隐藏的窗口。\n"
-            "（若系统不允许隐藏其它应用，仍然会只标记当前应用，识别一样不会被干扰）"
+        # 标注模式：编号标注 / 纯坐标 / 关闭（便于 A/B 对比哪种更准）
+        self.som_mode_combo = QComboBox()
+        self.som_mode_combo.addItem("编号标注", "marks")
+        self.som_mode_combo.addItem("纯坐标", "coords")
+        self.som_mode_combo.addItem("不标注", "off")
+        self.som_mode_combo.setToolTip(
+            "编号标注：在截图上画框并编号，模型输出编号 → 点击最准（推荐）\n"
+            "纯坐标：不画框，模型直接给坐标，程序吸附到最近的元素中心\n"
+            "不标注：完全不识别元素，纯靠模型看图给坐标（省 token，但最容易点偏）"
         )
-        self.reset_desktop_cb.setChecked(bool(get_settings().agent.reset_desktop))
-        self.reset_desktop_cb.toggled.connect(self._on_reset_desktop_toggled)
-        btn_row.addWidget(self.reset_desktop_cb)
+        cur_mode = str(get_settings().agent.som_mode or "marks")
+        idx = self.som_mode_combo.findData(cur_mode)
+        self.som_mode_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.som_mode_combo.currentIndexChanged.connect(self._on_som_mode_changed)
+        btn_row.addWidget(self.som_mode_combo)
+
+        # 只标注当前窗口：背景应用的按钮不进编号表，减少干扰（不动用户的任何窗口）
+        self.frontmost_only_cb = QCheckBox("只标当前窗口")
+        self.frontmost_only_cb.setToolTip(
+            "只标记「最前面的那个应用 + 程序坞」，背景窗口的按钮不会混进编号表。\n"
+            "不会隐藏或移动任何窗口，纯粹是少标一些元素。"
+        )
+        self.frontmost_only_cb.setChecked(bool(get_settings().agent.som_frontmost_only))
+        self.frontmost_only_cb.toggled.connect(self._on_frontmost_only_toggled)
+        btn_row.addWidget(self.frontmost_only_cb)
 
         self.run_btn = QPushButton("▶ 发送")
         self.run_btn.setObjectName("primary")
@@ -253,15 +268,30 @@ class MainWindow(QMainWindow):
         else:
             self.status.setText("未配置 API · 请到「设置」填写")
 
-    def _on_reset_desktop_toggled(self, checked: bool) -> None:
-        """持久化「运行前清空桌面」开关（写进 user.yaml 的 agent.reset_desktop）。"""
+    def _on_som_mode_changed(self, _index: int) -> None:
+        """持久化标注模式（写进 user.yaml 的 agent.som_mode）。"""
+        from ..settings import set_agent_option
+
+        mode = self.som_mode_combo.currentData() or "marks"
+        try:
+            set_agent_option("som_mode", str(mode))
+            self.status.setText(
+                {"marks": "标注模式：编号标注（推荐）",
+                 "coords": "标注模式：纯坐标（不画框）",
+                 "off": "标注模式：不标注（省 token）"}.get(str(mode), f"标注模式：{mode}")
+            )
+        except Exception as e:
+            self.status.setText(f"保存失败：{e}")
+
+    def _on_frontmost_only_toggled(self, checked: bool) -> None:
+        """持久化「只标当前窗口」（写进 user.yaml 的 agent.som_frontmost_only）。"""
         from ..settings import set_agent_option
 
         try:
-            set_agent_option("reset_desktop", bool(checked))
+            set_agent_option("som_frontmost_only", bool(checked))
             self.status.setText(
-                "已开启：每次运行前会隐藏其它应用" if checked
-                else "已关闭：运行前不动你的窗口"
+                "只标注当前窗口 + 程序坞" if checked
+                else "标注屏幕上所有可见应用"
             )
         except Exception as e:
             self.status.setText(f"保存失败：{e}")
@@ -344,11 +374,6 @@ class MainWindow(QMainWindow):
                     self.log_view.appendPlainText(f"[{ts}] 📄 日志文件：{p}")
             except Exception:
                 pass
-        elif etype == "prepare":
-            msg = event.get("message", "")
-            self.log_view.appendPlainText(f"[{ts}] 🧹 {msg}")
-            self.status.setText(f"🧹 {msg}")
-            self.floating.update_status("清空桌面…")
         elif etype == "plan":
             subtasks = event.get("subtasks", [])
             lines = ["📋 任务拆分："]

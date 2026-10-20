@@ -22,7 +22,6 @@ import os
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ..actions.desktop import CleanReport, clean_desktop
 from ..actions.executor import ActionExecutor
 from ..actions.schema import Action
 from ..common.errors import (
@@ -39,7 +38,7 @@ from ..grounding.verify import verify_screen_changed
 from ..memory import MemoryManager
 from ..perception import a11y as a11y_mod
 from ..perception.screenshot import capture_screen, get_screen_size, region_to_pixel
-from ..perception.som import build_som_mapping, describe_marks
+from ..perception.som import MarkStabilizer, build_som_mapping, describe_marks
 from ..prompts.loader import prompt_language
 from ..safety.policy import check_action_allowed, detect_injection, sanitize_context
 from ..skills.registry import SkillRegistry
@@ -88,17 +87,81 @@ def _action_target_sig(action: Action) -> Tuple[Any, ...]:
 
 
 def _is_input_like(el: Any) -> bool:
-    """判断这个元素是不是「可以输入文字」的控件。"""
+    """判断这个元素是不是「可以输入文字」的控件。
+
+    注意排除「列表里的文本字段」：Finder/资源管理器/Electron 列表的行标签
+    在 AX 里就是 AXTextField，但点它只是选中那一行，不是聚焦输入框。
+    误判的后果很严重——下一轮会强推模型去 type，把文字打进文件列表。
+    """
     try:
         role = str(getattr(el, "role", "") or "")
         title = str(getattr(el, "title", "") or "")
         desc = str(getattr(el, "description", "") or "")
+        in_list = bool(getattr(el, "in_list", False))
     except Exception:
+        return False
+    if in_list:
         return False
     if role in _INPUT_ROLES:
         return True
     text = f"{title} {desc}"
     return any(k in text for k in _INPUT_KEYWORDS)
+
+
+def _name_matches(name: str, text: str) -> bool:
+    """名字是否出现在文本里（对短名字做长度保护，避免 "C" 匹配一切）。"""
+    if not name or not text:
+        return False
+    n = name.strip().lower()
+    t = text.lower()
+    if len(n) < 3:
+        # 2 个汉字算有效（"下载"），单个字母/数字不算
+        cjk = sum(1 for c in n if ord(c) > 127)
+        if cjk < 2:
+            return False
+    return n in t
+
+
+def _verify_mark_semantics(action: Action, marks_map: Dict[int, Any]) -> Optional[int]:
+    """检查「模型说要点的东西」和「它给的编号」是否是同一个元素。
+
+    本地模型非常容易犯这个错：它嘴上说 "click yuling"，手里输出的却还是
+    上一轮的编号（那个编号现在指向 iCloud云盘）。SOM 编号如果跨帧漂移，
+    这种错误会直接把操作点到完全无关的位置。
+
+    返回纠正后的编号；不需要/无法纠正时返回 None。
+
+    只在「候选唯一」时纠正——模型一句 reason 里提到多个元素时不敢乱动。
+    """
+    if action.mark is None or action.mark not in marks_map:
+        return None
+    el = marks_map[action.mark]
+    reason = str(action.reason or "")
+    if not reason:
+        return None
+    current = str(getattr(el, "title", "") or "")
+    # 当前编号的名字本来就出现在 reason 里 → 没选错
+    if _name_matches(current, reason):
+        return None
+
+    # 找编号表里「名字出现在 reason 中」的候选，取最长的（最具体）
+    cands: List[Tuple[int, int]] = []
+    for num, other in marks_map.items():
+        if num == action.mark:
+            continue
+        t = str(getattr(other, "title", "") or "")
+        if _name_matches(t, reason):
+            cands.append((len(t.strip()), num))
+    if not cands:
+        return None
+    cands.sort(reverse=True)
+    top_len = cands[0][0]
+    if sum(1 for n, _ in cands if n == top_len) > 1:
+        return None  # 有歧义，宁可不改
+    # 第二名同样被提到、长度也接近 → 模型可能想点另一个，别自作聪明
+    if len(cands) > 1 and cands[1][0] * 1.5 > top_len:
+        return None
+    return cands[0][1]
 
 
 def _describe_target(action: Action) -> str:
@@ -167,16 +230,22 @@ class AgentLoop:
         self.max_plan_rejects = self.cfg.get("max_plan_rejects", 2)
         # 「已点击但还没输入文字」的输入框描述（由 _build_input_hint 回灌给模型）
         self._pending_input: Optional[str] = None
-        # ── 运行前清场：把其它应用隐藏掉，减少 SOM 标记干扰 ──
-        # 默认关闭：只有通过配置（GUI/CLI）显式开启才会动用户的窗口，
-        # 避免单元测试或库调用时意外把别人的桌面收掉。
-        self.reset_desktop = bool(self.cfg.get("reset_desktop", False))
-        self.reset_desktop_keep = list(self.cfg.get("reset_desktop_keep") or [])
-        self._clean_report: Optional[CleanReport] = None
-        if self.reset_desktop:
-            # 清场模式：只标记「当前最前面的应用 + 程序坞」，背景应用的按钮一个都不标。
-            # 这是不依赖任何权限的兜底——即使系统不允许隐藏窗口，屏幕再乱也不会干扰识别。
+        # 标注模式：
+        #   marks  —— 在截图上画编号框，模型输出编号（默认，最准）
+        #   coords —— 不画框，让模型直接给像素坐标（坐标会吸附最近的元素）
+        #   off    —— 完全不枚举，纯靠模型看图给坐标（最省，但最容易点偏）
+        self.som_mode = str(self.cfg.get("som_mode") or "marks").strip().lower()
+        if self.som_mode not in ("marks", "coords", "off"):
+            self.som_mode = "marks"
+        # 只标注「最前面的应用 + 程序坞」：屏幕再乱也不会被背景窗口的按钮带偏。
+        # 这是纯感知侧的降噪，不碰用户的任何窗口。
+        self.som_frontmost_only = bool(self.cfg.get("som_frontmost_only", True))
+        if self.som_frontmost_only:
             self.som_max_apps = 1
+        # 编号跨帧稳定器：同一个元素在不同帧拿到同一个编号，模型跨帧指代才可靠
+        self._mark_stab = MarkStabilizer()
+        # 任务涉及菜单时才标菜单栏项（否则它们占掉一大排编号还几乎用不到）
+        self._skip_menubar = True
         # 提示词语言（en/zh）：决定系统提示词与运行期提示用哪种语言
         self.prompt_lang = str(self.cfg.get("prompt_language") or "").strip() or prompt_language()
         self._user_stopped = False
@@ -194,15 +263,15 @@ class AgentLoop:
         self.memory.start_task(task)
         self._user_stopped = False
         self._pending_input = None
+        # 每任务重来一套编号（同一任务内编号保持稳定，跨任务不需要延续）
+        self._mark_stab.reset()
+        low = task.lower()
+        self._skip_menubar = not any(
+            k in low for k in ("菜单", "menu", "导出", "export", "另存为", "偏好设置", "preference")
+        )
 
         self._emit({"type": "start", "task": task})
         log.info("开始任务：%s", task)
-
-        # 0. 清场：隐藏其它应用，只留桌面 + 程序坞。
-        #    屏幕上的窗口越少，SOM 枚举出来的干扰元素就越少，模型也更容易选对目标。
-        self._clean_report = None
-        if self.reset_desktop and not self.dry_run and not self._user_stopped:
-            self._prepare_desktop(task)
 
         # 本次运行的排障记录目录（截图 + trace.jsonl），用于事后定位点错/找不到元素
         run_dir = None
@@ -239,14 +308,18 @@ class AgentLoop:
                     # 记录缩放比例，用于把模型返回的坐标还原回逻辑像素
                     sx, sy = scale_factor(before, obs_img)
 
-                    # 1.5 SOM 标记：枚举可交互元素，画编号框，供模型精确指代
+                    # 1.5 元素标注：按 som_mode 决定「画编号框」还是「只枚举供吸附」
+                    #     marks  → 画框 + 把编号表给模型（模型输出编号，最准）
+                    #     coords → 不画框，只枚举出来用于坐标吸附与语义校验
+                    #     off    → 什么都不做，纯靠模型看图给坐标
                     marks_map = {}
                     marks_desc = ""
                     a11y_stats: Dict[str, Any] = {}
-                    if self.use_som:
+                    if self.som_mode != "off":
                         try:
                             # 元素坐标是逻辑像素；若截图被缩放过，画框时要换算到图像像素
                             img_scale = (1.0 / sx) if sx else 1.0
+                            draw_boxes = self.som_mode == "marks"
                             marked_img, marks_map, _ = build_som_mapping(
                                 obs_img,
                                 max_elements=self.som_max_marks,
@@ -254,9 +327,13 @@ class AgentLoop:
                                 dock_max=self.som_dock_max,
                                 max_apps=self.som_max_apps,
                                 language=self.prompt_lang,
+                                stabilizer=self._mark_stab,
+                                skip_menubar=self._skip_menubar,
+                                draw=draw_boxes,
                             )
-                            obs_img = marked_img
-                            marks_desc = describe_marks(marks_map, self.prompt_lang)
+                            if draw_boxes:
+                                obs_img = marked_img
+                                marks_desc = describe_marks(marks_map, self.prompt_lang)
                             a11y_stats = dict(a11y_mod.last_stats)
                             apps = a11y_stats.get("apps") or []
                             apps_desc = "、".join(
@@ -299,7 +376,6 @@ class AgentLoop:
                     # 2.5 提示词组装（顺序 = 重要度递增，模型最后看到的最强）：
                     #     子任务计划 → 最近动作 → 输入提醒 → 感知异常
                     hint_parts = [
-                        self._build_prepare_hint(step),
                         self._build_subtask_hint(),
                         self._build_progress_hint(
                             recent, repeat_count, no_change_count
@@ -323,7 +399,9 @@ class AgentLoop:
                         memory_context=mem_ctx,
                         working_context=work_ctx,
                         screen_size=(screen.width, screen.height),
-                        marks=marks_map,
+                        # coords 模式不把编号表给模型（编号没画在图上，给了也指不准），
+                        # 但 marks_map 仍用于坐标吸附
+                        marks=marks_map if self.som_mode == "marks" else None,
                         marks_desc=marks_desc,
                         extra_hint=progress_hint,
                         language=self.prompt_lang,
@@ -438,6 +516,22 @@ class AgentLoop:
 
                     # 5. ground + safety 检查
                     check_action_allowed(action.type)
+
+                    # 5.4 编号语义校验：模型说点 A、编号却是 B 时自动纠正
+                    #     （本地模型经常复用上一轮的编号，而编号指向的元素已经变了）
+                    fixed = _verify_mark_semantics(action, marks_map)
+                    if fixed is not None:
+                        old_num = action.mark
+                        old_el = marks_map[old_num]
+                        new_el = marks_map[fixed]
+                        action.mark = fixed
+                        msg = (
+                            f"编号纠正：模型说要点「{new_el.title or new_el.label()}」，"
+                            f"但给的编号 #{old_num} 是「{old_el.title or old_el.label()}」"
+                            f"→ 改用 #{fixed}"
+                        )
+                        log.warning(msg)
+                        self._emit({"type": "notice", "step": step, "message": msg})
 
                     # 5.5 坐标解析：优先用 SOM 编号查表，否则用像素坐标还原
                     raw_x, raw_y = action.x, action.y
@@ -896,68 +990,6 @@ class AgentLoop:
             raw_text=raw_text,
             result_desc=result_desc,
         )
-
-    def _prepare_desktop(self, task: str) -> None:
-        """任务开始前隐藏其它应用（⌘H 语义，不退出、不关窗）。"""
-        try:
-            report = clean_desktop(
-                task=task,
-                keep=self.reset_desktop_keep,
-                exclude_pids=[os.getpid()],
-            )
-        except Exception as e:  # 清场失败不影响主流程
-            log.warning("清空桌面失败（忽略，继续执行）：%s", e)
-            return
-        self._clean_report = report
-        msg = report.summary()
-        self._emit({"type": "prepare", "message": msg, "hidden": report.hidden})
-        if report.hidden:
-            log.info("已清空桌面：%s", msg)
-        else:
-            log.info("清场：%s", msg)
-
-    def _build_prepare_hint(self, step: int) -> str:
-        """第一步告诉模型「清场模式已生效」，让它从程序坞打开目标应用。"""
-        r = self._clean_report
-        if step > 1 or r is None:
-            return ""
-        lines = [
-            self._t(
-                "【清场模式】本轮只标记「当前最前面的应用 + 程序坞」，背景应用的按钮不会被标记。",
-                "[Clean-screen mode] Only the frontmost app + the dock are marked this task; "
-                "buttons of background apps are not marked.",
-            )
-        ]
-        if r.hidden:
-            kept = f"（保留：{'、'.join(r.kept[:4])}）" if r.kept else ""
-            lines.append(
-                self._t(
-                    f"任务开始前已隐藏其它 {len(r.hidden)} 个应用{kept}，"
-                    f"它们只是被隐藏、没有关闭也没有丢状态，点程序坞图标就能原样恢复。",
-                    f"{len(r.hidden)} other apps were hidden before the task started. They were only "
-                    f"hidden — not closed, no state lost — click their dock icon to restore them.",
-                )
-            )
-        elif r.error:
-            lines.append(
-                self._t(f"（隐藏其它应用失败：{r.error}）", f"(hiding other apps failed: {r.error})")
-            )
-        else:
-            lines.append(
-                self._t(
-                    "（系统不允许隐藏其它应用的窗口，所以没有动它们。）",
-                    "(macOS does not allow hiding other apps here, so they were left untouched.)",
-                )
-            )
-        lines.append(
-            self._t(
-                "如果你要操作的应用**现在不在前台**，请先点程序坞里它的图标把它调到前台，"
-                "下一步它的界面控件才会被标记出来。不要凭记忆去点别的窗口。",
-                "If the app you need is **not in the foreground**, click its icon in the dock first; "
-                "its controls are marked from the next step on. Do not click other windows from memory.",
-            )
-        )
-        return "\n".join(lines)
 
     def _build_input_hint(self) -> str:
         """「点了输入框但还没输入文字」时，把模型推回 type 动作。

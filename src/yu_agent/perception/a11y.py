@@ -36,6 +36,11 @@ class UIElement:
     app: str = ""             # 所属应用名（多应用枚举时用于提示模型）
     kind: str = "app"         # "app" = 应用窗口内元素；"dock" = 程序坞图标；"ocr" = OCR 识别到的文字
     enabled: bool = True      # AXEnabled；False 表示禁用（点了也没用）
+    # 是否位于「列表/表格/单元格」内部。
+    # Finder、访达列表、Electron 列表里的**文件名标签**在 AX 里就是 AXTextField，
+    # 但它不是输入框（点一下是选中文件）。不区分的话会把「点文件名」误判成
+    # 「聚焦输入框」，进而逼模型去 type 一堆文字。这个标记用于纠正该误判。
+    in_list: bool = False
 
     @property
     def cx(self) -> float:
@@ -51,7 +56,11 @@ class UIElement:
         if self.kind == "app" and self.app:
             parts.append(self.app)
         role_map = _ROLE_EN if _LABEL_LANG == "en" else _ROLE_ZH
-        parts.append(role_map.get(self.role, self.role))
+        if self.in_list and self.role in _TEXT_INPUT_ROLES:
+            # 列表里的「文本字段」通常只是可点/可双击的行标签，不是输入框
+            parts.append("list item" if _LABEL_LANG == "en" else "列表项")
+        else:
+            parts.append(role_map.get(self.role, self.role))
         if self.title:
             parts.append(self.title)
         else:
@@ -102,6 +111,15 @@ _ROLE_PRIORITY: Dict[str, int] = {
     "AXLink": 3,
     "AXCell": 4, "AXRow": 4, "AXTabGroup": 4,
     "AXImage": 5, "AXStaticText": 6,
+}
+
+# 真正的「文字输入」角色（用于 in_list 误判纠正）
+_TEXT_INPUT_ROLES = {"AXTextField", "AXTextArea", "AXSearchField", "AXSecureTextField"}
+
+# 父链里出现这些角色 → 该元素属于「列表/表格」里的行
+_LIST_PARENT_ROLES = {
+    "AXCell", "AXRow", "AXList", "AXOutline", "AXOutlineRow", "AXTable",
+    "AXBrowser", "AXColumn", "AXGrid",
 }
 
 # 从这些子角色身上可以挖到「名字」（用于 _text_from_children）
@@ -472,6 +490,7 @@ def _walk(
     limit: int,
     screen: Optional[Tuple[float, float]] = None,
     app_name: str = "",
+    in_list: bool = False,
 ) -> None:
     """递归遍历 AX 树，收集可交互元素。
 
@@ -502,9 +521,13 @@ def _walk(
                         app=app_name,
                         kind="app",
                         enabled=_enabled_of(child),
+                        in_list=in_list,
                     )
                 )
-        _walk(child, out, depth + 1, limit, screen, app_name)
+        _walk(
+            child, out, depth + 1, limit, screen, app_name,
+            in_list or role in _LIST_PARENT_ROLES,
+        )
 
 
 def get_frontmost_app_elements(
@@ -743,6 +766,47 @@ def _dedupe_by_rect(elements: List[UIElement], tolerance: int = 3) -> List[UIEle
     return out
 
 
+def _drop_noise(elements: List[UIElement], skip_menubar: bool = True) -> List[UIElement]:
+    """丢掉「标了也没用」的元素，让编号表更短、模型更容易读准。
+
+    规则全部是通用的（不针对某个 App）：
+    - 菜单栏项：绝大多数任务用不到，而且它们挤在屏幕顶端一长排，
+      编号会互相压住；只有任务明确提到菜单时才保留（skip_menubar=False）。
+    - 尺寸过小（宽 < 12 或高 < 10）：点下去必定偏，标出来只会误导。
+    - 无标签且 disabled：既不知道是什么，也不能点。
+    - 整块屏幕大小的容器：不是可点目标（防止点中心等于点空白）。
+    """
+    sw, sh = _screen_size()
+    out: List[UIElement] = []
+    for el in elements:
+        if skip_menubar and el.role == "AXMenuBarItem":
+            continue
+        if el.w < 12 or el.h < 10:
+            continue
+        if not el.title and not el.enabled:
+            continue
+        if sw and sh and el.w >= sw * 0.95 and el.h >= sh * 0.95:
+            continue
+        out.append(el)
+
+    # 输入类套娃：搜索框/地址栏经常是「AXSearchField 外层 + AXTextField 内层」，
+    # 两层会被标成两个编号，挤在同一个位置（实测 Safari 地址栏、微信搜索框都这样）。
+    # 只保留面积大的外层——点哪个坐标其实一样，少一个编号模型就少一分犹豫。
+    inputs = [e for e in out if e.role in _TEXT_INPUT_ROLES]
+    if len(inputs) > 1:
+        drop: set = set()
+        for e in inputs:
+            for o in inputs:
+                if o is e or id(e) in drop:
+                    continue
+                if (o.w * o.h) > (e.w * e.h) and _contains(o, e):
+                    drop.add(id(e))
+                    break
+        if drop:
+            out = [e for e in out if id(e) not in drop]
+    return out
+
+
 def _cap_unnamed_icons(
     elements: List[UIElement], budget: int = _UNNAMED_ICON_MAX
 ) -> List[UIElement]:
@@ -769,6 +833,7 @@ def _app_elements(
     limit: int,
     screen: Tuple[float, float],
     is_frontmost: bool = False,
+    skip_menubar: bool = True,
 ) -> List[UIElement]:
     """枚举单个应用的元素，并丢掉被前面窗口盖住的（点了也点不到）。
 
@@ -792,6 +857,9 @@ def _app_elements(
             continue        # 被更靠前的窗口遮住 → 不要标记，免得模型点了个点不到的位置
         kept.append(el)
 
+    # 降噪：菜单栏项 / 点不中的细小元素 / 无标签且禁用 / 全屏容器
+    kept = _drop_noise(kept, skip_menubar=skip_menubar)
+
     # 按角色优先级裁剪：输入框/按钮优先于装饰性文字
     kept.sort(key=lambda e: (_ROLE_PRIORITY.get(e.role, 9), e.w * e.h))
 
@@ -804,10 +872,11 @@ def _app_elements(
 
 
 def get_all_interactive_elements(
-    max_elements: int = 120,
+    max_elements: int = 60,
     auto_calibrate: bool = True,
-    dock_max: int = 30,
-    max_apps: int = _MAX_APPS,
+    dock_max: int = 20,
+    max_apps: int = 1,
+    skip_menubar: bool = True,
 ) -> List[UIElement]:
     """汇总所有可交互元素（屏幕上各应用 + 程序坞），坐标已校准到屏幕点击坐标系。
 
@@ -854,7 +923,8 @@ def get_all_interactive_elements(
         name = _app_name(pid) or f"pid{pid}"
         cap = min(caps[i], max(1, app_budget - len(elements)))
         kept = _app_elements(
-            pid, name, occluders, cap, screen, is_frontmost=(i == 0)
+            pid, name, occluders, cap, screen,
+            is_frontmost=(i == 0), skip_menubar=skip_menubar,
         )
         per_app.append({"pid": pid, "name": name, "elements": len(kept)})
         elements.extend(kept)

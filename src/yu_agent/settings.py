@@ -48,9 +48,13 @@ class AgentConfig(BaseModel):
     max_no_change_steps: int = 3  # 屏幕连续无变化多少次判定卡住
     max_plan_rejects: int = 2  # 重复拆分子任务多少次判定死循环并停止
     type_interval_s: float = 0.02  # 逐字输入每个字符的间隔（只影响纯 ASCII；中文走粘贴）
-    # ── 运行前清场：隐藏其它应用，减少屏幕上窗口太多造成的识别干扰 ──
-    reset_desktop: bool = True
-    reset_desktop_keep: List[str] = Field(default_factory=list)  # 额外保留、不要隐藏的应用名
+    # ── 元素标注（SOM）──
+    # marks = 截图上画编号框，模型输出编号（默认，最准）
+    # coords = 不画框，模型直接给像素坐标（坐标会吸附最近的元素）
+    # off = 完全不枚举元素，纯看图给坐标（最省，最容易点偏）
+    som_mode: str = "marks"
+    som_max_marks: int = 60  # 单帧最多标多少个（太多会互相重叠、模型看不过来）
+    som_frontmost_only: bool = True  # 只标最前面的应用 + 程序坞
     stop_on_grounding_error: bool = True
     dry_run: bool = False
 

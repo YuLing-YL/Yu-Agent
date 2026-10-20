@@ -248,7 +248,8 @@ def test_multiapp_enumeration_and_occlusion() -> None:
         mod._calibrate = lambda: (0.0, 0.0)
         mod._app_name = lambda pid: {1: "Safari", 2: "终端", 3: "备忘录"}.get(pid, "")
 
-        def fake_app_elements(pid, name, occluders, limit, screen, is_frontmost=False):
+        def fake_app_elements(pid, name, occluders, limit, screen,
+                              is_frontmost=False, skip_menubar=True):
             calls.append({"pid": pid, "name": name, "limit": limit,
                           "occluders": len(occluders), "front": is_frontmost})
             return [
@@ -315,7 +316,7 @@ def test_background_app_menubar_skipped() -> None:
         mod._app_name = lambda pid: "后台应用"
         mod._dedupe = lambda els: els
 
-        def fake_walk(el, out, depth, limit, screen, app_name=""):
+        def fake_walk(el, out, depth, limit, screen, app_name="", in_list=False):
             out.append(UIElement(id=0, role="AXMenuBarItem", title="文件",
                                  x=112, y=16, w=47, h=33, app=app_name))
             out.append(UIElement(id=1, role="AXButton", title="真的按钮",
@@ -324,14 +325,23 @@ def test_background_app_menubar_skipped() -> None:
         mod._walk = fake_walk
 
     with _patch_a11y(setup) as mod:
+        # 默认：菜单栏项一律不标（几乎用不到，而且一长排会占掉大量编号）
         front = mod._app_elements(1, "前台", [], 50, (1512.0, 982.0), is_frontmost=True)
-        assert len(front) == 2, "前台应用的菜单栏项应当保留"
+        assert [e.title for e in front] == ["真的按钮"], front
 
-        back = mod._app_elements(2, "后台", [], 50, (1512.0, 982.0), is_frontmost=False)
+        # 任务确实要用菜单时（skip_menubar=False）：前台保留，后台重影仍丢弃
+        front2 = mod._app_elements(
+            1, "前台", [], 50, (1512.0, 982.0), is_frontmost=True, skip_menubar=False
+        )
+        assert len(front2) == 2, "显式要求菜单时，前台应用的菜单栏项应当保留"
+
+        back = mod._app_elements(
+            2, "后台", [], 50, (1512.0, 982.0), is_frontmost=False, skip_menubar=False
+        )
         assert [e.title for e in back] == ["真的按钮"], (
             f"非前台应用的菜单栏项应被丢弃，实际 {[e.title for e in back]}"
         )
-        print("✓ 非前台应用的菜单栏重影已被忽略")
+        print("✓ 菜单栏项默认跳过；非前台应用的菜单栏重影始终忽略")
 
 
 def test_describe_marks_grouped() -> None:
@@ -348,14 +358,15 @@ def test_describe_marks_grouped() -> None:
                      app="程序坞", kind="dock"),
     }
     text = describe_marks(mp, "zh")
-    assert "【Safari】#1~#2" in text, text
-    assert "【程序坞】#3" in text, text
+    # 编号跨帧稳定后不再连续，分组头用「数量 + 编号列表」
+    assert "【Safari】2 个：#1, #2" in text, text
+    assert "【程序坞】1 个图标" in text, text
     assert "Safari | 按钮 | 后退" in text, text
 
     # 英文模式下表头与角色名都要变成英文
     en_text = describe_marks(mp, "en")
-    assert "[Safari] #1~#2" in en_text, en_text
-    assert "[dock] #3" in en_text, en_text
+    assert "[Safari] 2: #1, #2" in en_text, en_text
+    assert "[dock] 1 icons" in en_text, en_text
     assert "Safari | button | 后退" in en_text, en_text
     print("✓ 编号表按应用分组，中英文表头都正确")
 
