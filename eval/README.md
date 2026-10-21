@@ -160,3 +160,22 @@ Agent 主循环里的 `success` 有一部分来自兜底逻辑（「重复动作
 
 加完先 `--list` 看判据有没有解析对，再 `-t 新id -n 1` 单跑一次验证判据会不会误判。
 **判据要先能判对，再谈成功率。**
+
+---
+
+## 目录说明
+
+```
+eval/
+├── tasks.yaml     # 任务集定义（加任务只改这里）
+├── checks.py      # 判据实现（硬/软分级）
+├── runner.py      # 运行器：跑 → 判定 → 汇总 → 报告
+├── compare.py     # 两次结果的 A/B 对比
+├── README.md
+└── reports/       # 产物（gitignore，只留 .gitkeep）
+```
+
+`tasks/`、`runners/`、`metrics/` 是早期规划时留下的空占位目录（只有 `.gitkeep`），
+当前实现是上面这种平铺结构，那三个目录没有用到 —— 为了命令短一点
+（`python eval/runner.py` 比 `python eval/runners/runner.py` 顺），没有往里拆。
+
