@@ -51,7 +51,7 @@ def main(argv=None) -> int:
     p_log.add_argument("-n", type=int, default=0, help="显示末尾 n 行（默认只显示路径）")
 
     # gui：启动图形界面（默认）
-    sub.add_parser("gui", help="启动图形界面")
+    sub.add_parser("gui", help="启动调试面板（标注图 / 编号表 / 模型原文 / 单步执行）")
 
     # doctor：环境自检
     sub.add_parser("doctor", help="检查环境依赖")

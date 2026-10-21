@@ -23,11 +23,13 @@ class AgentWorker(QThread):
         task: str,
         model_config: Optional[ModelConfig] = None,
         dry_run: bool = False,
+        step_mode: bool = False,
     ):
         super().__init__()
         self.task = task
         self.model_config = model_config
         self.dry_run = dry_run
+        self.step_mode = step_mode
         self._agent: Optional[YuAgent] = None
 
     def run(self) -> None:
@@ -38,6 +40,11 @@ class AgentWorker(QThread):
                 dry_run=self.dry_run,
                 callback=self._on_event,
             )
+            # 单步调试：主循环每执行完一步就挂起，等界面点「下一步」
+            try:
+                self._agent.loop.step_mode = bool(self.step_mode)
+            except Exception:
+                pass
 
             # 2. 意图识别 + 生成回复
             responder = Responder(self._agent.backend)
@@ -80,6 +87,14 @@ class AgentWorker(QThread):
     def stop(self) -> None:
         if self._agent:
             self._agent.stop()
+
+    def next_step(self) -> None:
+        """单步调试：放行下一步。"""
+        try:
+            if self._agent:
+                self._agent.loop.request_next_step()
+        except Exception:
+            pass
 
     def _on_event(self, event: dict) -> None:
         self.event.emit(event)

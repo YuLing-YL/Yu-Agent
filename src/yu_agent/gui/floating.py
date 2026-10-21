@@ -84,6 +84,8 @@ class FloatingBar(QWidget):
             | Qt.Tool
         )
         self.setAttribute(Qt.WA_TranslucentBackground, False)
+        # 无边框窗口默认不画 QSS 背景，显式打开，否则控制条会是一片透明/黑块
+        self.setAttribute(Qt.WA_StyledBackground, True)
         # 本应用失去焦点时保持可见（任务运行必然会切走焦点）
         try:
             self.setAttribute(Qt.WA_MacAlwaysShowToolWindow, True)

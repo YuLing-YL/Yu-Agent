@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -246,6 +247,11 @@ class AgentLoop:
         self._mark_stab = MarkStabilizer()
         # 任务涉及菜单时才标菜单栏项（否则它们占掉一大排编号还几乎用不到）
         self._skip_menubar = True
+        # ── 单步调试：每执行完一步就暂停，等界面点「下一步」──
+        # 默认关闭（正常跑完整个任务）；GUI 调试面板可勾选开启。
+        self.step_mode = bool(self.cfg.get("step_mode", False))
+        self._step_gate = threading.Event()
+        self._step_gate.set()  # 初始放行：点「运行」要先跑第一步
         # 提示词语言（en/zh）：决定系统提示词与运行期提示用哪种语言
         self.prompt_lang = str(self.cfg.get("prompt_language") or "").strip() or prompt_language()
         self._user_stopped = False
@@ -659,7 +665,7 @@ class AgentLoop:
 
                     # 8.5 排障追踪：把这一步「模型看到什么 / 说了什么 / 点了哪」
                     #     落盘到 runs/<时间戳>/，方便事后定位点错位置的原因
-                    self._save_trace(
+                    img_path = self._save_trace(
                         run_dir=run_dir,
                         step=step,
                         obs_img=obs_img,
@@ -671,6 +677,29 @@ class AgentLoop:
                         raw_y=raw_y,
                         raw_text=self.planner.last_raw_text,
                         result_desc=result_desc,
+                    )
+
+                    # 8.6 调试面板要的全部信息，一次性推给界面：
+                    #     模型实际看到的标注图 / 编号表 / 模型原始输出 / 解析出的动作
+                    #     （界面上直接看，不用再翻 runs 目录）
+                    self._emit(
+                        {
+                            "type": "step_detail",
+                            "step": step,
+                            "image": str(img_path) if img_path else "",
+                            "marks_total": len(marks_map),
+                            "marks_desc": marks_desc,
+                            "model_raw": self.planner.last_raw_text or "",
+                            "action": action.type,
+                            "mark": action.mark,
+                            "x": action.x,
+                            "y": action.y,
+                            "text": action.text,
+                            "key": action.key,
+                            "reason": action.reason,
+                            "result": result_desc,
+                            "run_dir": str(run_dir) if run_dir else "",
+                        }
                     )
 
                     # 9. 判断是否结束（模型自己说完成）
@@ -717,6 +746,10 @@ class AgentLoop:
                     # （计的是「连续无进展的拆分」，偶发一次空 plan 不会累积误停）
                     if action.type != "wait":
                         plan_rejects = 0
+
+                    # 11. 单步调试：本步执行完就挂起，等界面点「下一步」
+                    if not self._wait_for_next_step(step):
+                        break
 
                 except SafetyViolation as e:
                     log.warning("安全拦截：%s", e)
@@ -1076,9 +1109,9 @@ class AgentLoop:
         raw_text: str,
         result_desc: str,
     ) -> None:
-        """把单步的观察/决策/坐标落盘，供事后排障。"""
+        """把单步的观察/决策/坐标落盘，供事后排障。返回截图路径（失败返回 None）。"""
         if run_dir is None:
-            return
+            return None
         try:
             img_path = run_dir / f"step_{step:02d}.png"
             obs_img.save(img_path)
@@ -1100,8 +1133,10 @@ class AgentLoop:
             }
             with (run_dir / "trace.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            return img_path
         except Exception as e:
             log.debug("写追踪记录失败（忽略）：%s", e)
+            return None
 
     def _execute(self, action: Action) -> str:
         """执行动作（含技能调用），返回结果描述。"""
@@ -1125,6 +1160,28 @@ class AgentLoop:
         """外部请求停止（用户点击停止 / 关闭窗口）。"""
         self._user_stopped = True
         self.state.running = False
+        # 若正卡在单步暂停里，立刻放行让它走到 break 分支退出
+        self._step_gate.set()
+
+    # ------------------------------------------------------------------ #
+    # 单步调试
+    # ------------------------------------------------------------------ #
+    def request_next_step(self) -> None:
+        """单步调试：放行下一步（界面点「下一步」时调用）。"""
+        self._step_gate.set()
+
+    def _wait_for_next_step(self, step: int) -> bool:
+        """单步模式下暂停；返回 False 表示用户已停止，应退出循环。"""
+        if not self.step_mode:
+            return True
+        self._step_gate.clear()
+        self._emit({"type": "paused", "step": step, "max_steps": self.max_steps})
+        log.info("单步模式：第 %d 步已执行，等待「下一步」", step)
+        while not self._step_gate.wait(0.2):
+            if self._user_stopped:
+                log.info("单步暂停中被用户停止，退出循环")
+                return False
+        return not self._user_stopped
 
     def _emit(self, event: Dict[str, Any]) -> None:
         if self.callback:
