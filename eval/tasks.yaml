@@ -1,0 +1,130 @@
+# Yu-Agent 评测集 core-v1
+#
+# 设计原则
+# 1. 每个任务都有**独立判据**，不采信模型自己输出的 done（历史上出现过「反复点同一处
+#    屏幕没变化」被误判成完成）。判据全部从系统状态读：前台应用、窗口标题、
+#    可交互元素、文件系统。
+# 2. 判据强弱分级：
+#    - frontmost_app / file_exists / window_title → 硬判据（自动 pass/fail 可信）
+#    - element_exists / screen_text              → 软判据（自动通过即 pass；
+#      不通过时降级为「待人工」，因为有些应用 a11y 读不到文字，不能算失败）
+# 3. pre_check 用来挡掉「起点就已经满足终点」的假成功：例如 Safari 本来就在前台，
+#    再让它「打开 Safari」必然是 pass。这类情况该次运行记为 invalid，不计入成功率。
+#
+# 用法见 eval/README.md，或 python eval/runner.py --list
+
+meta:
+  name: core-v1
+  runs: 3              # 每个任务默认跑几次（--runs 可覆盖）
+  cooldown_s: 3        # 两次运行之间的等待，给界面留出稳定时间
+
+# 评测前先建好沙盒目录（runner --setup 会自动创建）
+sandbox: /tmp/yu_eval_sandbox
+
+tasks:
+  # ── 应用启动 ──────────────────────────────────────────────
+  - id: finder_open
+    category: 应用启动
+    task: "打开访达（Finder）"
+    check:
+      kind: frontmost_app
+      expect: ["Finder", "访达"]
+    pre_check:
+      kind: not_frontmost_app
+      expect: ["Finder", "访达"]
+
+  - id: safari_open
+    category: 应用启动
+    task: "打开 Safari 浏览器"
+    check:
+      kind: frontmost_app
+      expect: ["Safari", "Safari浏览器"]
+    pre_check:
+      kind: not_frontmost_app
+      expect: ["Safari", "Safari浏览器"]
+
+  # ── 文件导航 ──────────────────────────────────────────────
+  - id: finder_enter_dir
+    category: 文件导航
+    task: "在访达中打开 /Users/yuling/code/Yu-Agent 这个文件夹"
+    check:
+      kind: window_title
+      expect: ["Yu-Agent"]
+    pre_check:
+      kind: not_frontmost_app
+      expect: ["Finder", "访达"]
+
+  - id: finder_multi_step
+    category: 多步串联
+    task: "打开访达，进入 /tmp/yu_eval_sandbox 文件夹，然后双击打开里面的 note.txt 文件"
+    check:
+      kind: window_title
+      expect: ["note"]
+    pre_check:
+      kind: not_frontmost_app
+      expect: ["Finder", "访达"]
+
+  # ── 文件操作（快捷键 + 输入）──────────────────────────────
+  - id: finder_new_folder
+    category: 文件操作
+    task: "打开访达，进入 /tmp/yu_eval_sandbox，新建一个名为 eval_ok 的文件夹"
+    check:
+      kind: file_exists
+      path: /tmp/yu_eval_sandbox/eval_ok
+    pre_check:
+      kind: not_file_exists
+      path: /tmp/yu_eval_sandbox/eval_ok
+
+  # ── 浏览器搜索（输入能力）─────────────────────────────────
+  - id: safari_search_en
+    category: 搜索-英文
+    task: "用 Safari 搜索 python tutorial"
+    check:
+      kind: window_title
+      expect: ["python", "Python"]
+    pre_check:
+      kind: not_frontmost_app
+      expect: ["Safari", "Safari浏览器"]
+
+  - id: safari_search_zh
+    category: 搜索-中文
+    task: "用 Safari 搜索今天天气"
+    check:
+      kind: window_title
+      expect: ["天气"]
+    pre_check:
+      kind: not_frontmost_app
+      expect: ["Safari", "Safari浏览器"]
+
+  # ── 文本输入 ──────────────────────────────────────────────
+  - id: textedit_type
+    category: 文本输入
+    task: "打开「文本编辑」（TextEdit），新建文稿并输入 hello yu-agent"
+    check:
+      kind: screen_text
+      expect: ["hello yu-agent", "hello"]
+    pre_check:
+      kind: not_frontmost_app
+      expect: ["TextEdit", "文本编辑"]
+
+  # ── 系统设置（层级导航）───────────────────────────────────
+  - id: settings_display
+    category: 系统设置
+    task: "打开系统设置，进入「显示器」设置页面"
+    check:
+      kind: window_title
+      expect: ["显示器", "Displays"]
+    pre_check:
+      kind: not_frontmost_app
+      expect: ["系统设置", "System Settings", "System Preferences"]
+
+  # ── 终端（键盘 + 命令）───────────────────────────────────
+  - id: terminal_echo
+    category: 终端命令
+    task: "打开终端（Terminal），执行命令 echo yu_eval_ok"
+    check:
+      kind: screen_text
+      expect: ["yu_eval_ok"]
+    pre_check:
+      kind: not_frontmost_app
+      expect: ["Terminal", "终端"]
