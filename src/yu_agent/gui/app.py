@@ -498,19 +498,26 @@ class MainWindow(QMainWindow):
         steps = state.get("steps", 0)
         reason = state.get("reason", "")
 
+        # 状态栏/悬浮条只有一行，长文本会溢出；日志里保留完整内容
+        short = reason if len(reason) <= 60 else reason[:57] + "…"
+
         if state.get("skipped"):
             self.status.setText("已回复（未操作屏幕）")
             self.floating.hide()
         elif success:
             tag = "自动停止（判定已完成）" if state.get("auto_stopped") else "任务完成"
             self.log_view.appendPlainText(f"[{ts}] {tag}：共 {steps} 步")
-            self.status.setText(f"{tag}：{reason}")
-            self.floating.mark_finished(True, reason)
+            # 「屏幕上有什么」这类任务的答案就是 reason，必须完整留在日志里
+            if reason:
+                for line in str(reason).splitlines():
+                    self.log_view.appendPlainText(f"    {line}")
+            self.status.setText(f"{tag}：{short}")
+            self.floating.mark_finished(True, short)
             self._hide_timer.start(10000)
         else:
             self.log_view.appendPlainText(f"[{ts}] 结束（共 {steps} 步）：{reason}")
-            self.status.setText(f"未完成：{reason}")
-            self.floating.mark_finished(False, reason)
+            self.status.setText(f"未完成：{short}")
+            self.floating.mark_finished(False, short)
 
         self.run_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
