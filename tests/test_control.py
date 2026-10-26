@@ -207,20 +207,6 @@ def test_usage_lands_in_state() -> None:
     print("✓ 用量统计落到了 state 上（CLI/GUI 可直接展示）")
 
 
-if __name__ == "__main__":
-    test_pause_blocks_and_resume_releases()
-    test_pause_can_be_aborted_by_stop()
-    test_ask_without_asker_returns_empty()
-    test_ask_uses_asker()
-    test_usage_meter_accumulates()
-    test_usage_without_price_reports_no_cost()
-    test_ask_action_answer_reaches_next_prompt()
-    test_risky_click_is_blocked()
-    test_usage_lands_in_state()
-    test_replan_when_stuck()
-    print("\nALL PASS")
-
-
 # ── 5. 卡住时的重规划 ───────────────────────────────────────────── #
 def test_replan_when_stuck() -> None:
     """原计划走不通时，允许重新拆分一次（否则只能撞上自动停止）。"""
@@ -239,3 +225,19 @@ def test_replan_when_stuck() -> None:
     )
     assert any("重新规划" in p for p in prompts), "重规划后应告诉模型换了思路"
     print("✓ 卡住后重规划生效（旧计划被替换）")
+
+
+# 脚本模式（python tests/test_control.py）：必须放在所有测试函数**之后**，
+# 否则最后定义的 test_replan_when_stuck 还没绑定就调用 → NameError。
+if __name__ == "__main__":
+    test_pause_blocks_and_resume_releases()
+    test_pause_can_be_aborted_by_stop()
+    test_ask_without_asker_returns_empty()
+    test_ask_uses_asker()
+    test_usage_meter_accumulates()
+    test_usage_without_price_reports_no_cost()
+    test_ask_action_answer_reaches_next_prompt()
+    test_risky_click_is_blocked()
+    test_usage_lands_in_state()
+    test_replan_when_stuck()
+    print("\nALL PASS")

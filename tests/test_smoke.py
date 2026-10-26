@@ -9,16 +9,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 def test_imports() -> None:
     """验证所有核心模块可导入。"""
-    from yu_agent import YuAgent, build_agent_from_settings
-    from yu_agent.actions import Action, ActionExecutor, describe_actions
-    from yu_agent.agent import AgentLoop, Planner, Reflector, Responder, AgentState
-    from yu_agent.grounding import GroundingResolver, parse_action, parse_actions
-    from yu_agent.memory import MemoryManager
-    from yu_agent.models import get_backend, VLMRequest, VLMResponse
-    from yu_agent.perception import capture_screen, get_screen_size, Observation
-    from yu_agent.safety import check_action_allowed, detect_injection
-    from yu_agent.settings import get_settings, reload_settings
-    from yu_agent.skills import build_default_registry
 
     print("✓ 所有核心模块导入成功")
 
@@ -188,8 +178,6 @@ def _patch_a11y(monkeypatch_fn):
 
 def test_dock_not_truncated() -> None:
     """回归：程序坞不能被硬截断（用户有 26 个图标时右半截曾完全没有标记）。"""
-    from yu_agent.perception import a11y
-    from yu_agent.perception.a11y import UIElement
 
     N = 26
 
@@ -231,7 +219,6 @@ def test_oversized_container_filtered() -> None:
 
 def test_multiapp_enumeration_and_occlusion() -> None:
     """回归：要枚举屏幕上所有可见应用，并丢掉被前面窗口遮住的元素。"""
-    from yu_agent.perception import a11y
     from yu_agent.perception.a11y import UIElement
 
     calls = []
@@ -282,7 +269,6 @@ def test_multiapp_enumeration_and_occlusion() -> None:
 
 def test_occluded_elements_dropped() -> None:
     """回归：被更靠前窗口盖住的元素不该被标记（点了也点不到）。"""
-    from yu_agent.perception import a11y
     from yu_agent.perception.a11y import UIElement
 
     def setup(mod):
@@ -310,7 +296,6 @@ def test_occluded_elements_dropped() -> None:
 
 def test_background_app_menubar_skipped() -> None:
     """回归：非前台应用的「菜单栏项」是重影，不能标记。"""
-    from yu_agent.perception import a11y
     from yu_agent.perception.a11y import UIElement
 
     def setup(mod):

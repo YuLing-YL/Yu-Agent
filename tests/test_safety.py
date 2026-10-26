@@ -44,6 +44,25 @@ def test_classify_does_not_flag_editing() -> None:
     print("✓ 编辑类动作与滚动不误伤；危险快捷键能识别")
 
 
+def test_plain_close_is_not_high_risk() -> None:
+    """「关闭 / 退出 / Close」在界面上到处都是，单独出现不能算高风险。
+
+    否则每个窗口标题栏的关闭按钮都会进审批队列，无人值守场景直接瘫痪。
+    只有和「不保存 / 放弃 / 丢弃」同时出现，才升级成 high。
+    """
+    for text in ("关闭", "关闭窗口", "Close", "退出", "Quit", "关闭设置"):
+        assert classify("click", target_text=text).level == "low", f"{text} 不该判高风险"
+
+    # 双信号：关闭 + 不保存 → 真的可能丢内容
+    for text in ("不保存并关闭", "关闭但不保存", "放弃更改并退出", "Close without saving"):
+        r = classify("click", target_text=text)
+        assert r.level == "high", f"{text} 应判 high，实际 {r}"
+
+    # 单纯的「不保存」按钮本身也是 high
+    assert classify("click", target_text="不保存").level == "high"
+    print("✓ 普通关闭不误报；「不保存并关闭」才升级")
+
+
 # ── 2. 审批 ─────────────────────────────────────────────────────── #
 def test_critical_blocked_without_approver() -> None:
     """没人可问时不可逆动作一律拦下——不替用户删东西。"""
@@ -105,6 +124,7 @@ def test_injection_detected_and_explained() -> None:
 if __name__ == "__main__":
     test_classify_destructive_is_critical()
     test_classify_does_not_flag_editing()
+    test_plain_close_is_not_high_risk()
     test_critical_blocked_without_approver()
     test_approver_callback_decides()
     test_guard_blocks_and_reports()

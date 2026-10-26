@@ -159,7 +159,6 @@ def test_prompts_have_both_paths() -> None:
 # ── 应用查找：目录扫描 / mdfind / Spotlight ─────────────────────── #
 def test_scan_app_dirs_finds_bundle() -> None:
     """open -a 认不出的名字，靠扫应用程序目录找 .app。"""
-    import os
     import shutil
 
     base = Path(__file__).resolve().parent / "_tmp_appdirs"
@@ -233,7 +232,7 @@ def test_open_app_uses_mdfind_as_last_resort() -> None:
     builtin.time.sleep = lambda *_: None
     builtin._scan_app_dirs = lambda name: ""          # 目录里找不到
     try:
-        out = _make_registry().call("open_app", app_name="Weird")
+        _make_registry().call("open_app", app_name="Weird")
     finally:
         (builtin.subprocess.run, builtin._frontmost_app_name,
          builtin.time.sleep, builtin._scan_app_dirs) = orig

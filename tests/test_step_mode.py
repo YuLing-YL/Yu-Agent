@@ -69,7 +69,7 @@ def make_agent(events: list, steps: int = 4):
                 text=f'{{"type": "click", "x": {x}, "y": 150, "reason": "step {self.i}"}}'
             )
 
-    lp = AgentLoop(
+    return AgentLoop(
         Backend(),
         MemoryManager(store=MemoryStore(db_path=":memory:")),
         build_default_registry(),
@@ -77,7 +77,6 @@ def make_agent(events: list, steps: int = 4):
         dry_run=True,
         callback=lambda e: events.append(e),
     )
-    return lp
 
 
 def start_run(steps: int, step_mode: bool):
