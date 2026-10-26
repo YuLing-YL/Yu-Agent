@@ -43,6 +43,8 @@ from ..perception.som import MarkStabilizer, build_som_mapping, describe_marks
 from ..prompts.loader import prompt_language
 from ..safety.policy import check_action_allowed, detect_injection, sanitize_context
 from .anchor import ocr_anchor
+from .ask_flow import handle_ask
+from .describe import describe_action, describe_screen
 from .control import RunControl
 from .finish_gate import FinishGate
 from .guard import ActionGuard, summarize_texts
@@ -79,29 +81,6 @@ def _quantize(v: Optional[int]) -> Optional[int]:
     if v is None:
         return None
     return int(round(float(v) / _COORD_GRID))
-
-
-def _describe_screen(a11y_stats: Dict[str, Any], en: bool = False) -> str:
-    """一句话说清"操作之前屏幕长什么样"（写进工作记忆）。
-
-    只保留对下一步有用的信息：哪个应用在前、一共多少个可点元素。
-    具体元素名会随截图变化，写多了反而让模型拿旧信息做判断。
-    """
-    apps = a11y_stats.get("apps") or []
-    if not apps:
-        return ""
-    first = apps[0] or {}
-    name = str(first.get("name") or "")
-    total = sum(int(a.get("elements") or 0) for a in apps)
-    if not name:
-        return ""
-    if en:
-        if len(apps) > 1:
-            return f"{name} +{len(apps) - 1} more app(s), {total} clickable elements"
-        return f"{name}, {total} clickable elements"
-    if len(apps) > 1:
-        return f"{name} 等 {len(apps)} 个应用，{total} 个可点元素"
-    return f"{name}，{total} 个可点元素"
 
 
 def _dist_to_rect(x: float, y: float, el: Any) -> float:
@@ -597,49 +576,33 @@ class AgentLoop:
                         break
 
                     # 3.5 ask：模型需要用户补信息（选哪个账号/哪个文件/要不要覆盖…）
-                    #     不允许它瞎猜——猜错的代价往往比多问一句大得多。
+                    #     让它问，而不是猜——猜错的代价往往比多问一句大得多。
                     if action.type == "ask":
-                        question = (action.text or action.reason or "").strip() or "需要补充信息"
-                        options = action.args.get("options") or []
-                        answer = self.control.ask(question, options)
-                        if answer:
-                            self._answer_hint = self._t(
-                                f"【用户回答】针对你刚才的问题「{question[:80]}」，"
-                                f"用户回答：{answer[:200]}。请按这个回答继续，不要重复提问。",
-                                f"[User answer] For your question \"{question[:80]}\", "
-                                f"the user answered: {answer[:200]}. Continue with it; "
-                                f"do not ask the same question again.",
-                            )
-                            desc = f"已询问用户并得到回答：{answer[:60]}"
-                        else:
-                            self._answer_hint = self._t(
-                                "【系统】你上一步想向用户提问，但没有得到回答（当前无人接管）。"
-                                "请根据现有信息和屏幕内容自行做出最合理的决定，不要再重复提问。",
-                                "[System] Your question got no answer (nobody is attending). "
-                                "Decide yourself from the screen and the task; do not ask again.",
-                            )
-                            desc = "提问无人回答，改为自行决定"
-                        log.info("ask：%s → %s", question[:60], desc)
-                        self._emit({"type": "result", "step": step, "result": desc})
+                        outcome = handle_ask(action, self.control, self._t)
+                        self._answer_hint = outcome.hint
+                        log.info("ask：%s → %s", outcome.question[:60], outcome.description)
+                        self._emit(
+                            {"type": "result", "step": step, "result": outcome.description}
+                        )
                         self.memory.add_step(
                             step=step,
-                            observation_summary=_describe_screen(
+                            observation_summary=describe_screen(
                                 a11y_stats, en=self.prompt_lang.lower().startswith("en")
                             ),
-                            action=f"提问「{question[:40]}」",
-                            result=desc,
+                            action=f"提问「{outcome.question[:40]}」",
+                            result=outcome.description,
                             effect="changed",
                         )
                         self.state.history.append(
                             {
                                 "step": step,
                                 "action": "ask",
-                                "action_desc": f"提问「{question[:40]}」",
+                                "action_desc": f"提问「{outcome.question[:40]}」",
                                 "reason": action.reason,
-                                "result": desc,
+                                "result": outcome.description,
                             }
                         )
-                        recent.append(f"步骤{step}: 提问 → {desc[:40]}")
+                        recent.append(f"步骤{step}: 提问 → {outcome.description[:40]}")
                         del recent[:-6]
                         continue
 
@@ -881,7 +844,7 @@ class AgentLoop:
                         blocked = f"未执行：{decision.reason}"
                         self.memory.add_step(
                             step=step,
-                            observation_summary=_describe_screen(
+                            observation_summary=describe_screen(
                                 a11y_stats, en=self.prompt_lang.lower().startswith("en")
                             ),
                             action=self._describe_step_action(action, marks_map),
@@ -992,7 +955,7 @@ class AgentLoop:
                     #    屏幕上发生了什么"。以前记的是 "执行click / click(513,127)"，
                     #    既没说是哪个元素，也没说生效没有，等于白记。
                     step_action = self._describe_step_action(action, marks_map)
-                    step_screen = _describe_screen(
+                    step_screen = describe_screen(
                         a11y_stats, en=str(self.prompt_lang).lower().startswith("en")
                     )
                     if not screen_changed and action.type not in (
@@ -1338,54 +1301,8 @@ class AgentLoop:
     # 记忆
     # ------------------------------------------------------------------ #
     def _describe_step_action(self, action: Action, marks_map=None) -> str:
-        """把动作翻译成一句人话（写进工作记忆，下一轮喂回给模型）。
-
-        为什么要翻译：`click(513,127)` 这种记录模型下一轮根本认不出来，
-        它需要的是「我点了搜索框」——才能判断"这个动作已经做过了"。
-        """
-        en = str(self.prompt_lang).lower().startswith("en")
-        t = action.type
-
-        if t in _CLICK_TYPES:
-            el = marks_map.get(action.mark) if (marks_map and action.mark is not None) else None
-            name = str(getattr(el, "title", "") or "") if el is not None else ""
-            if en:
-                verb = {
-                    "click": "clicked", "double_click": "double-clicked",
-                    "right_click": "right-clicked", "middle_click": "middle-clicked",
-                    "triple_click": "triple-clicked",
-                }.get(t, "clicked")
-                if name:
-                    return f'{verb} "{name}"'
-                if action.mark is not None:
-                    return f"{verb} an unlabeled element"
-                return f"{verb} ({action.x},{action.y})"
-            verb = {
-                "click": "点击", "double_click": "双击", "right_click": "右键点击",
-                "middle_click": "中键点击", "triple_click": "三击",
-            }.get(t, "点击")
-            if name:
-                return f"{verb}「{name}」"
-            if action.mark is not None:
-                return f"{verb}了一个无标签元素"
-            return f"{verb} ({action.x},{action.y})"
-
-        if t == "type":
-            txt = (action.text or "")[:24]
-            return f'typed "{txt}"' if en else f"输入「{txt}」"
-        if t == "key":
-            return f"pressed {action.key}" if en else f"按了 {action.key}"
-        if t == "scroll":
-            return f"scrolled {action.text or ''}".strip() if en else f"滚动 {action.text or ''}".strip()
-        if t == "skill":
-            return f"called skill {action.skill}" if en else f"调用技能 {action.skill}"
-        if t == "drag":
-            return "dragged" if en else "拖拽"
-        if t == "wait":
-            return "waited" if en else "等待"
-        if t in ("done", "finish", "subtask_done"):
-            return "finished" if en else "结束任务"
-        return t
+        """把动作翻译成一句人话（实现见 agent/describe.py）。"""
+        return describe_action(action, marks_map, self.prompt_lang)
 
     def _llm_summarize(self, system: str, user: str) -> str:
         """给记忆蒸馏用的纯文本总结（不附图，固定低温，短输出）。"""
