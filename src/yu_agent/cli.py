@@ -55,6 +55,10 @@ def main(argv=None) -> int:
     p_mem.add_argument("-n", type=int, default=10, help="每类显示最近多少条（默认 10）")
     p_mem.add_argument("--kind", default="", help="只看某一类：episodic/semantic/procedural")
     p_mem.add_argument("--clear", action="store_true", help="清空长期记忆（需再确认）")
+    p_mem.add_argument(
+        "--prune-legacy", action="store_true",
+        help="只删除旧版蒸馏留下的占位记录（「轨迹: …」「…的方法已沉淀」），保留其余",
+    )
     p_mem.add_argument("--yes", action="store_true", help="配合 --clear，跳过确认")
 
     # logs：查看日志文件位置 / 末尾内容
@@ -261,6 +265,10 @@ def _format_marks(mapping) -> list:
     return lines
 
 
+# 旧版蒸馏写入的占位记录特征（清理用）
+_LEGACY_PATTERNS = ("轨迹: ", "轨迹：", "的方法已沉淀")
+
+
 def _memory(args) -> int:
     """查看 / 清空长期记忆。
 
@@ -279,6 +287,11 @@ def _memory(args) -> int:
                     return 0
             m.store.clear()
             print("长期记忆已清空。")
+            return 0
+
+        if args.prune_legacy:
+            n = m.store.delete_like(_LEGACY_PATTERNS)
+            print(f"已删除 {n} 条旧格式占位记忆（其余记忆保留）。")
             return 0
 
         view = m.memory_view(limit=max(1, args.n))
@@ -313,6 +326,13 @@ def _memory(args) -> int:
             print("\n（还没有长期记忆。跑完一个任务后会自动生成。）")
         else:
             print(f"\n共 {total} 条。清空用：python -m yu_agent memory --clear")
+        legacy = m.store.count_like(_LEGACY_PATTERNS)
+        if legacy:
+            print(
+                f"⚠️ 其中 {legacy} 条是旧版蒸馏留下的占位记录（「轨迹: …」这类，"
+                f"没有信息量，会混进召回）。\n"
+                f"   只删它们：python -m yu_agent memory --prune-legacy"
+            )
         return 0
     finally:
         m.close()

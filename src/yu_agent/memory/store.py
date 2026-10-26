@@ -120,6 +120,26 @@ class MemoryStore:
         self._conn.commit()
         return int(row["id"])
 
+    def delete_like(self, patterns: List[str]) -> int:
+        """按内容模式批量删除，返回删除条数（清理旧格式记忆用）。"""
+        n = 0
+        for pat in patterns:
+            cur = self._conn.execute(
+                "DELETE FROM memories WHERE content LIKE ?", (f"%{pat}%",)
+            )
+            n += cur.rowcount or 0
+        self._conn.commit()
+        return n
+
+    def count_like(self, patterns: List[str]) -> int:
+        n = 0
+        for pat in patterns:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM memories WHERE content LIKE ?", (f"%{pat}%",)
+            ).fetchone()
+            n += int(row["c"] if row else 0)
+        return n
+
     def delete_kind(self, kind: str) -> None:
         self._conn.execute("DELETE FROM memories WHERE kind = ?", (kind,))
         self._conn.commit()
