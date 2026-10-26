@@ -596,6 +596,8 @@ class AgentLoop:
                             "x": action.x,
                             "y": action.y,
                             "text": action.text,
+                            "skill": action.skill,
+                            "args": action.args,
                         }
                     )
                     if self.dry_run:
@@ -696,6 +698,9 @@ class AgentLoop:
                             "y": action.y,
                             "text": action.text,
                             "key": action.key,
+                            # 技能调用也要透出，否则界面上只看到 "skill"，不知道调了哪个
+                            "skill": action.skill,
+                            "args": action.args,
                             "reason": action.reason,
                             "result": result_desc,
                             "run_dir": str(run_dir) if run_dir else "",
@@ -1060,16 +1065,25 @@ class AgentLoop:
         dock_count = a11y_stats.get("dock_elements") or 0
 
         if a11y_stats.get("dock_hidden"):
-            # 程序坞开了「自动隐藏」：图标在屏幕外，点了也没用
+            # 程序坞开了「自动隐藏」：图标在屏幕外，点了也没用。
+            # 给两条能走通的路：open_app 直接开；show_dock 让 Dock 滑出来再点图标。
             return self._t(
-                "【系统提示】程序坞当前是「自动隐藏」状态，图标在屏幕外，点了没有反应，"
-                "所以没有把它们放进编号表。\n"
-                "要打开某个应用，请用键盘：先按 cmd+space 打开聚焦搜索（Spotlight），"
-                '然后下一步用 type 输入应用名，再按 enter 回车启动。',
-                "[System note] The dock is set to auto-hide: its icons are off-screen and clicking "
-                "them does nothing, so they were left out of the element list.\n"
-                "To open an app, use the keyboard instead: press cmd+space to open Spotlight, then "
-                "`type` the app name on the next step and press enter to launch it.",
+                "【系统提示】程序坞当前是「自动隐藏」状态，图标在屏幕外，没放进编号表，"
+                "点屏幕底部没有反应。打开应用走这两条：\n"
+                "① 一步到位："
+                '{"type": "skill", "skill": "open_app", "args": {"app_name": "Safari"}}\n'
+                "② 必须点图标时，先唤醒程序坞："
+                '{"type": "skill", "skill": "show_dock", "args": {"edge": "bottom"}}\n'
+                "　 鼠标移到底部后程序坞会滑出，下一张截图里图标就有编号了，再点它。",
+                "[System note] The dock is set to auto-hide: its icons are off-screen, they were "
+                "left out of the element list, and clicking the bottom edge does nothing. Two ways "
+                "to open an app:\n"
+                "1) one step: "
+                '{"type": "skill", "skill": "open_app", "args": {"app_name": "Safari"}}\n'
+                "2) if you really need to click an icon, wake the dock first: "
+                '{"type": "skill", "skill": "show_dock", "args": {"edge": "bottom"}}\n'
+                "   It slides the dock out; the icons get numbers in the next screenshot — click "
+                "them then.",
             )
 
         if marks_map and not app_count and dock_count:

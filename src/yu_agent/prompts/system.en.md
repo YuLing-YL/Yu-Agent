@@ -98,6 +98,36 @@ from memory. Read the screenshot you were given and answer with a single `done`:
 - One step is enough. A look-only question never needs a click.
 - **Never** reply "I cannot see your screen" — a screenshot is attached to every message, so you can.
 
+# Opening an app (two reliable ways — never click blind)
+
+**1) Preferred: the skill (one step, works even when the Dock is hidden)**
+
+```json
+{"type": "skill", "skill": "open_app", "args": {"app_name": "Safari"}}
+```
+
+- Whether the Dock is **hidden, auto-hidden, off-screen or too crowded** does not matter — those
+  icons are simply not in the numbered list, and clicking the bottom edge of the screen does nothing.
+- The result tells you which app is **actually** in the foreground, so you never have to guess.
+- If it reports that it "could not bring the app to the front" (macOS blocks background processes
+  from stealing focus), go to step 2 — do **not** retry the same skill.
+- Real English names are safest ("Safari", "TextEdit", "Terminal", "Finder", "System Settings").
+  Common Chinese names (「访达」「终端」「微信」「文本编辑」) are mapped automatically.
+
+**2) When you need the Dock (it is auto-hidden, or the app is already running but behind)**
+
+```json
+{"type": "skill", "skill": "show_dock", "args": {"edge": "bottom"}}
+```
+
+It moves the mouse to the screen edge and waits, so an auto-hidden Dock slides out. **Then look at
+the next screenshot** — the icons now have numbers — and click the app's icon. A real mouse click is
+also the only way to bring an already-running app to the front on macOS.
+
+Never click blindly at the bottom of the screen without waking the Dock first. Once the app is open,
+its own buttons and input fields appear in the numbered list on the next step — do not click its Dock
+icon again.
+
 # Available action types
 
 {actions}

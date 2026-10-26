@@ -411,12 +411,19 @@ class MainWindow(QMainWindow):
         elif etype == "action":
             x, y = event.get("x"), event.get("y")
             coord = f" ({x},{y})" if x is not None else ""
+            act = event.get("action")
+            if act == "skill":
+                # 技能调用没有坐标，改成显示「技能名(参数)」，否则日志里只有一个 skill
+                sk = event.get("skill") or "?"
+                args = event.get("args") or {}
+                shown = ", ".join(f"{k}={v}" for k, v in list(args.items())[:3])
+                coord = f" {sk}({shown})" if shown else f" {sk}"
             self.log_view.appendPlainText(
-                f"[{ts}] 动作 {event.get('action')}{coord} — {event.get('reason', '')}"
+                f"[{ts}] 动作 {act}{coord} — {event.get('reason', '')}"
             )
-            self.status.setText(f"执行 {event.get('action')}{coord}")
+            self.status.setText(f"执行 {act}{coord}")
             self.floating.update_status(
-                f"{event.get('action')}{coord}", step=event.get("step")
+                f"{act}{coord}", step=event.get("step")
             )
         elif etype == "result":
             self.log_view.appendPlainText(f"[{ts}]   -> {event.get('result')}")
