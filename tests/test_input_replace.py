@@ -168,6 +168,22 @@ def test_loop_auto_replace_for_single_line_field() -> None:
     print(f"✓ loop：搜索框 → type 自动 replace（args={typed[0].args}）")
 
 
+def test_loop_respects_explicit_replace_false() -> None:
+    """模型显式写 replace:false（要追加）时不能被自动覆盖掉。"""
+    acts = _loop_with_script(
+        ['{"type":"click","mark":1,"reason":"focus the search field"}',
+         '{"type":"type","text":" 补充词","replace":false,"reason":"append"}',
+         '{"type":"done","reason":"ok"}'],
+        input_role="AXSearchField",
+    )
+    typed = [a for a in acts if a.type == "type"]
+    assert typed, "没有执行到 type"
+    assert typed[0].args.get("replace") is False, (
+        f"模型显式要求追加，不该被改成覆盖，实际 {typed[0].args}"
+    )
+    print("✓ loop：模型显式 replace=false 时不覆盖")
+
+
 def test_loop_no_auto_replace_for_textarea() -> None:
     acts = _loop_with_script(
         ['{"type":"click","mark":1,"reason":"focus the text area"}',
@@ -199,6 +215,7 @@ if __name__ == "__main__":
     test_executor_selects_all_before_typing()
     test_executor_accepts_string_flags()
     test_loop_auto_replace_for_single_line_field()
+    test_loop_respects_explicit_replace_false()
     test_loop_no_auto_replace_for_textarea()
     test_prompts_tell_model_to_overwrite()
     print("\n=== 输入覆盖测试全部通过 ===")

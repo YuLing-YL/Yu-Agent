@@ -662,15 +662,16 @@ class AgentLoop:
                     #     这一步又直接 type，就默认「替换」而不是「追加」。
                     #     实测模型想搜新词时只输出 click→type，从不清空旧词，
                     #     搜索框里变成「旧词新词」，搜出来的结果当然错。
+                    explicit = any(
+                        k in action.args for k in ("replace", "clear", "clear_first")
+                    )
                     if (
                         action.type == "type"
                         and self._pending_input_role in _SINGLE_LINE_INPUT_ROLES
-                        and not (
-                            action.args.get("replace")
-                            or action.args.get("clear")
-                            or action.args.get("clear_first")
-                        )
+                        and not explicit
                     ):
+                        # 模型显式写了 replace:false 就是它要追加，尊重它（`in` 判断，
+                        # 不能用取值真假判断，否则 False 会被当成"没写"又覆盖掉）。
                         action.args["replace"] = True
                         log.info(
                             "上一步聚焦的是单行输入框（%s），本次输入改为「全选覆盖」"
