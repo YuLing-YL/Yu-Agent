@@ -7,10 +7,8 @@ from __future__ import annotations
 
 import subprocess
 import time
-from typing import Any
 
 from .registry import SkillRegistry
-
 
 # macOS 的 `open -a` 只认英文名 / bundle 名，中文名有一半认不出来
 # （实测：访达✓ 终端✓ 文本编辑✗ 系统设置✗ 都报 -1728）。
@@ -224,8 +222,8 @@ def build_default_registry() -> SkillRegistry:
         def _bundle_id_of(path: str) -> str:
             """从 .app 路径读 bundle id（`open -b` 比 `open 路径` 更容易激活已运行的实例）。"""
             try:
-                import plistlib
                 import os
+                import plistlib
 
                 with open(os.path.join(path, "Contents", "Info.plist"), "rb") as f:
                     return str(plistlib.load(f).get("CFBundleIdentifier") or "")

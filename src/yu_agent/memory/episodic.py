@@ -1,7 +1,7 @@
 """情节记忆：一次任务的完整执行轨迹（长期、可回放）。"""
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List
 
 from .base import MemoryEntry
 from .store import MemoryStore

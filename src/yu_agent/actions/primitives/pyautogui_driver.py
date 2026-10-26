@@ -1,8 +1,6 @@
 """pyautogui 驱动的底层封装（薄封装，供 executor 或技能使用）。"""
 from __future__ import annotations
 
-import time
-
 
 def click(x: int, y: int, button: str = "left", clicks: int = 1) -> None:
     import pyautogui

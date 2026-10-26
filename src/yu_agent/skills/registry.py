@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from ..common.errors import SkillNotFoundError
@@ -16,12 +16,11 @@ class Skill:
     name: str
     description: str
     func: Callable[..., Any]
-    params: Dict[str, str] = None  # 参数名 -> 说明
+    # 参数名 -> 说明。用 default_factory 而不是 None 默认值：
+    # 之前写的是 `= None` + __post_init__ 兜底，但那让类型变成 Optional，
+    # 每个读取点都得再判一次空，纯属自找麻烦。
+    params: Dict[str, str] = field(default_factory=dict)
     returns: str = ""
-
-    def __post_init__(self):
-        if self.params is None:
-            self.params = {}
 
 
 class SkillRegistry:

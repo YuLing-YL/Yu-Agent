@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from ..common.errors import SafetyViolation
 from .policy import check_action_allowed
 from .risk import Risk
 

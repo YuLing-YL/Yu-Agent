@@ -1,7 +1,7 @@
 """用户画像记忆：长期记住用户偏好、常用 App、习惯等。"""
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import List
 
 from .base import MemoryEntry
 from .store import MemoryStore

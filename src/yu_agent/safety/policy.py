@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import re
-from typing import List, Optional
+from typing import Iterable, Optional
 
 from ..common.errors import SafetyViolation
 
-# 默认禁止的动作类型
+# 默认禁止的动作类型（可被 config 的 safety.forbidden_action_types 覆盖）
 FORBIDDEN_ACTIONS = {"run_shell", "shell", "exec", "rm", "delete_file"}
+# 「执行任意命令」这一类：safety.deny_shell_by_default=false 时放行
+_SHELL_ACTIONS = {"run_shell", "shell", "exec"}
 
 # 疑似提示词注入的特征（屏幕/记忆/上下文里出现这些，说明可能被污染）
 _INJECTION_PATTERNS = [
@@ -24,10 +26,23 @@ _INJECTION_PATTERNS = [
 ]
 
 
-def check_action_allowed(action_type: str) -> None:
-    """检查动作类型是否被允许。"""
+def check_action_allowed(
+    action_type: str,
+    forbidden: Optional[Iterable[str]] = None,
+    deny_shell: bool = True,
+) -> None:
+    """检查动作类型是否被允许。
+
+    forbidden: 配置里的禁用动作集合（None = 用默认集合）。
+    deny_shell: 是否禁掉「执行任意命令」这一类（safety.deny_shell_by_default）。
+    以前这两个配置项写在 yaml 里却没人读，属于"看起来有开关、其实一直按硬编码跑"。
+    """
     t = (action_type or "").lower()
-    if t in FORBIDDEN_ACTIONS:
+    # 配置里的禁用项只能**追加**，不能把安全基线减掉（否则改配置就能越权执行）
+    blocked = set(FORBIDDEN_ACTIONS) | set(forbidden or [])
+    if not deny_shell:
+        blocked -= _SHELL_ACTIONS
+    if t in blocked:
         raise SafetyViolation(f"动作类型『{action_type}』被安全策略禁止。")
 
 

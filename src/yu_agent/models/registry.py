@@ -1,7 +1,7 @@
 """后端注册表：provider 名 -> 后端工厂。"""
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any
 
 from .base import VLMBackend
 from .mock import MockBackend

@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-# 关键词 → (级别, 说明)。顺序无关，取最高级别。
+# 关键词 → (级别, 说明)。顺序有意义：同级时取**先出现**的那条（越靠前越具体）。
 _PATTERNS = [
     # critical：删了/发了/付了就回不来
     (r"删除|移除|移到废纸篓|清空废纸篓|格式化|抹掉|卸载|移除全部|delete|remove|erase|format|uninstall", "critical", "删除/卸载类操作"),
@@ -26,8 +26,16 @@ _PATTERNS = [
     (r"发送|发布|上传|提交订单|send|publish|post|submit order", "critical", "对外发送/发布"),
     (r"覆盖|替换全部|恢复出厂|重置|reset|overwrite|factory reset", "high", "可能覆盖已有内容"),
     # high：有代价但可挽回
-    (r"清空|清除|重置|close without saving|不保存|放弃|discard|退出|quit|close", "high", "可能丢弃未保存内容"),
+    (r"清空|清除", "high", "可能清空已有内容"),
+    (r"不保存|放弃更改|放弃修改|放弃编辑|丢弃|discard|don.?t save|without saving", "high", "可能丢弃未保存内容"),
 ]
+
+# 「关闭 / 退出 / Close」在 GUI 里到处都是——每个窗口标题栏都有，每个设置面板底部都有。
+# 把它们算成高风险会让审批弹窗变成噪音（无人值守时更是每一步都卡）。
+# 只有当它**同时**出现在「不保存 / 放弃 / 丢弃」这类上下文里，才真的是
+# 「可能丢掉未保存内容」。两个信号都命中才升级。
+_CLOSE_RE = re.compile(r"关闭|退出|close|quit|exit", re.IGNORECASE)
+_DISCARD_RE = re.compile(r"不保存|放弃|丢弃|未保存|discard|don.?t save|without saving", re.IGNORECASE)
 
 # 单字符组合键里的危险动作（键盘层面）
 _RISKY_KEYS = {
@@ -55,10 +63,6 @@ class Risk:
         return f"{self.level}风险（{self.category}：{self.detail}）"
 
 
-def _max(a: str, b: str) -> str:
-    return a if _LEVEL_ORDER.get(a, 0) >= _LEVEL_ORDER.get(b, 0) else b
-
-
 def classify(action_type: str, target_text: str = "", key: str = "") -> Risk:
     """判断一个动作的风险等级。
 
@@ -82,14 +86,30 @@ def classify(action_type: str, target_text: str = "", key: str = "") -> Risk:
     if not hay:
         return risk
 
+    hits = []
     for pattern, level, category in _PATTERNS:
         m = re.search(pattern, hay, re.IGNORECASE)
-        if not m:
-            continue
-        risk.level = _max(risk.level, level)
-        if not risk.category or _LEVEL_ORDER.get(level, 0) >= _LEVEL_ORDER.get(risk.level, 0):
-            risk.category = category
-        risk.detail = m.group(0)
+        if m:
+            hits.append((_LEVEL_ORDER.get(level, 0), level, category, m.group(0)))
+    if hits:
+        # 取级别最高的那条当说明；同级时 max() 返回**先出现**的那条，
+        # 也就是 _PATTERNS 里更具体的描述（旧代码会让后一条覆盖前一条，
+        # 于是「清空废纸篓」的说明会被「清空」盖掉）。
+        _, level, category, detail = max(hits, key=lambda h: h[0])
+        risk.level = level
+        risk.category = category
+        risk.detail = detail
+
+    # 「关闭」+「不保存/放弃」两条信号同时命中，才是真的可能丢内容
+    close_hit = _CLOSE_RE.search(hay)
+    if (
+        close_hit
+        and _DISCARD_RE.search(hay)
+        and _LEVEL_ORDER["high"] > _LEVEL_ORDER.get(risk.level, 0)
+    ):
+        risk.level = "high"
+        risk.category = "可能丢弃未保存内容"
+        risk.detail = close_hit.group(0)
 
     # 「删除线」「清除格式」这类其实是编辑功能，不该拦
     if risk.level != "low" and re.search(r"删除线|删除格式|清除格式|clear formatting", hay):
