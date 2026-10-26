@@ -188,28 +188,33 @@ Yu-Agent/
 │       └── reflect.py        #   卡死检测（重复动作/无变化）与纠偏
 │
 ├── eval/                     # 评测（和 tests 是两回事：这里量的是「成功率」）
-│   ├── tasks/                #   任务用例（yaml）
-│   ├── runners/              #   批量跑用例、产出报告
-│   ├── metrics/              #   任务成功率、单步成功率、定位准确率、成本、延迟
+│   ├── tasks.yaml            #   任务用例定义（加用例只改这里）
+│   ├── checks.py             #   判据：硬判据（前台应用/窗口标题/文件存在）+ 软判据
+│   ├── runner.py             #   批量跑用例 → 判定 → 汇总
+│   ├── compare.py            #   两次结果的 A/B 对比
 │   └── reports/              #   报告产物（不入库）
 │
-├── tests/
-│   ├── unit/                 #   纯函数单测：坐标换算、动作 schema 校验、策略规则、解析器
-│   ├── integration/          #   跨模块：mock env + mock 模型跑完整循环
-│   └── replay/               #   录制轨迹离线重放（CI 不依赖屏幕与 API key）
+├── tests/                    # 单元 + 冒烟测试（平铺，97 passed）
+│   ├── test_smoke.py         #   离线闭环：mock 模型跑完整循环
+│   ├── test_stop_logic.py    #   停止逻辑（重复动作/无变化/步数上限）
+│   ├── test_marks_quality.py / test_content_marks.py   # 标注质量与框校准
+│   ├── test_a11y_generic.py  #   a11y 通用命名/去重/降噪
+│   ├── test_input_module.py / test_input_replace.py    # 输入与旧内容覆盖
+│   ├── test_memory.py        #   短期/长期记忆
+│   └── test_open_app.py / test_responder.py / test_step_mode.py
 │
-├── scripts/                  # 开发脚本：抓一张屏、单测一次模型调用、录轨迹
-├── examples/                 # 可运行示例（原 demo/ 改名）
-├── notebooks/                # 探索性分析
-├── assets/                   # 图标模板、OCR 模型等静态资源
-├── data/                     # 任务用例与小样本数据（大文件不入库）
-│   └── memory/               #   ★ 长期记忆落盘（*.sqlite 不入库；与一次性的 runs/ 严格分开）
+├── scripts/run.sh            # 启动脚本
+├── data/                     # 运行时数据（目录入库，数据不入库）
+│   ├── config/user.yaml      #   API key / base_url（gitignore）
+│   ├── logs/                 #   yu_agent.log
+│   └── memory/               #   ★ 长期记忆落盘（*.sqlite 不入库；与 runs/ 严格分开）
 └── runs/                     # ★ 运行产物，整目录 gitignore
-    └── <timestamp>/          #   steps.jsonl + screenshots/ + video/ + agent.log
+    └── <timestamp>/          #   trace.jsonl + step_XX.png + 标注图
 ```
 
-> 上面所有模块文件目前都是 **0 字节占位符**（只有目录名和文件名，没有任何代码），
-> 目的是让结构在编辑器和 git 里可见，逐个填充时不会放错位置。
+> 目录只保留真正在用的：早期规划里的 `examples/`、`notebooks/`、`assets/`、
+> `eval/{tasks,runners,metrics}/`、`tests/{unit,integration,replay}/` 一直是空占位，
+> 已全部删除。
 
 ## 记忆分层（四层，不是一层）
 
@@ -225,7 +230,7 @@ Yu-Agent/
 
 1. **写入时机**：在线循环里不让模型每步写记忆（噪声大且贵）。任务结束后由 `distillation.py` 统一蒸馏，离线可批量重跑。
 2. **检索方式**：`sqlite + FTS5` 关键词检索 + `(app, 窗口标题)` 过滤。GUI 领域查询短、范围窄，通常优于向量检索，且**零新增依赖**；向量留作后续可选增强。
-3. **必须能证明有用**：`eval/tasks/` 带 `use_memory` 开关，同一套用例跑 on/off 对比成功率、平均步数、成本。否则无从判断记忆是在帮忙还是在引入幻觉。
+3. **必须能证明有用**：目标是给 `eval/tasks.yaml` 加 `use_memory` 开关，同一套用例跑 on/off 对比成功率、平均步数、成本——目前还没接（`config/default.yaml` 里只留了 flag 名）。在没测出对比之前，不能假定记忆一定在帮忙。
 
 ## 分层依赖规则
 

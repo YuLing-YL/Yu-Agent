@@ -93,11 +93,13 @@ memory:
     min_success_streak: 2    # 同一技能连续成功几次才沉淀为模板
     require_verification: true
   # 离线蒸馏（任务结束后统一做，不在循环里逐步写）
+  # ⚠️ 下面这几个开关目前**没有任何代码读取**：实际行为是「任务结束就提炼一次，
+  #    dry-run 跳过，失败不影响主流程」。留着是为了以后接 A/B 对照。
   distillation:
-    auto_after_task: false   # 默认手动/离线批量跑，避免拖慢在线循环
-    keep_failed_as_negative: true
+    auto_after_task: true    # （未接线）当前实际：任务结束必提炼
+    keep_failed_as_negative: true   # （未接线）当前实际：失败任务也写情节记忆，但不写技法模板
   # 供 eval 做记忆 on/off 对照
-  ab_test_flag: use_memory
+  ab_test_flag: use_memory   # （未接线）eval 还没有 memory on/off 开关
 
 paths:
   runs_dir: runs

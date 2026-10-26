@@ -21,10 +21,7 @@ observe(截屏) → recall(取记忆) → think(规划/拆分) → ground(定位
 | `runs/` | 每次运行的产物（截图 + 轨迹），一次性 | **整目录忽略** | 已实装 |
 | `tests/` | 测试：冒烟、停止逻辑等 | 是 | 部分实装 |
 | `scripts/` | 开发与启动脚本 | 是 | 已实装 |
-| `eval/` | 评测：任务用例、批量跑分、指标、报告 | 用例入库，报告不入库 | **占位**（仅 .gitkeep） |
-| `examples/` | 可运行示例 | 是 | **占位** |
-| `notebooks/` | 探索性分析 | 是 | **占位** |
-| `assets/` | 图标模板、OCR 模型等静态资源 | 大文件不入库 | **占位** |
+| `eval/` | 评测：任务用例（tasks.yaml）、判据、运行器、报告 | 用例入库，报告不入库 | 已实装 |
 | `.workbuddy/` | 工具私有记忆（项目工作日志） | 忽略 | 自动维护 |
 
 ---
@@ -235,19 +232,20 @@ observe(截屏) → recall(取记忆) → think(规划/拆分) → ground(定位
 | 文件 | 作用 |
 |---|---|
 | `run.sh` | 启动脚本：自动定位项目根、选择 Python 环境（`.venv` → WorkBuddy 隔离环境 → 系统）、检查依赖、启动 GUI |
-| `.gitkeep` | 占位 |
 
-### 占位目录（仅 `.gitkeep`，规划中）
+### 保留 `.gitkeep` 的运行时目录
 
-| 目录 | 规划用途 |
+git 不记录空目录，所以这四个目录各留一个 `.gitkeep` 让结构在仓库里可见：
+
+| 目录 | 为什么必须存在 |
 |---|---|
-| `eval/tasks/` | 任务用例（yaml），带 `use_memory` 开关做记忆 on/off 对照 |
-| `eval/runners/` | 批量跑用例、产出报告 |
-| `eval/metrics/` | 指标：任务成功率、单步成功率、定位准确率、成本、延迟 |
-| `eval/reports/` | 报告产物（不入库） |
-| `examples/` | 可运行示例（`Makefile demo` 期望的 `run_mock_demo.py` 尚未创建） |
-| `notebooks/` | 探索性分析 |
-| `assets/` | 图标模板、OCR 模型等静态资源 |
+| `runs/` | 每次运行写截图与轨迹（整目录 gitignore） |
+| `data/` | 用户配置 / 日志 / 记忆库的父目录 |
+| `data/memory/` | 长期记忆 sqlite 落盘位置 |
+| `eval/reports/` | 评测报告输出位置（`compare.py` 用） |
+
+> 早期规划里的 `examples/`、`notebooks/`、`assets/`、`eval/{tasks,runners,metrics}/`、
+> `tests/{unit,integration,replay}/` 从未填过内容，代码也零引用，已删除。
 
 ### `.workbuddy/`
 
@@ -290,6 +288,6 @@ perception/  models/
 |---|---|
 | `src/yu_agent/`（含 gui / skills） | ✅ 已实装，核心闭环可运行 |
 | `config/`、`data/`、`runs/`、`scripts/`、顶层文件 | ✅ 已实装 |
-| `tests/`（smoke + stop_logic） | ✅ 已实装（`unit/integration/replay` 仍占位） |
-| `eval/`、`examples/`、`notebooks/`、`assets/` | ⏳ 仅目录占位，待填充 |
-| `config/experiments/`、`config/models/` | ⏳ 尚未创建 |
+| `tests/` | ✅ 已实装（11 个测试文件，97 passed） |
+| `eval/` | ✅ 已实装（tasks.yaml + checks + runner + compare），缺基线数据 |
+| `config/experiments/`、`config/models/` | ⏳ 尚未创建（用 `user.yaml` 覆盖即可，暂不需要） |
