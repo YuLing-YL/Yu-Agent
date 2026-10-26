@@ -175,7 +175,7 @@ eval/
 └── reports/       # 产物（gitignore，只留 .gitkeep）
 ```
 
-`tasks/`、`runners/`、`metrics/` 是早期规划时留下的空占位目录（只有 `.gitkeep`），
-当前实现是上面这种平铺结构，那三个目录没有用到 —— 为了命令短一点
-（`python eval/runner.py` 比 `python eval/runners/runner.py` 顺），没有往里拆。
+早期规划里还画过 `tasks/`、`runners/`、`metrics/` 三个子目录，已经删掉了：
+用例定义就是一个 `tasks.yaml`，运行器/判据各一个文件，为了命令短一点
+（`python eval/runner.py` 比 `python eval/runners/runner.py` 顺）没有再往里拆。
 

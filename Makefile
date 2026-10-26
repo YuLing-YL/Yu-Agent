@@ -1,5 +1,4 @@
-# 说明：本文件是「待填充」的任务入口清单。venv/install/test/lint 现在可用；
-# doctor / screenshot / demo 需要 src/yu_agent 下对应模块写完后才能跑。
+# 说明：常用任务入口。demo 走 `yu_agent test`（mock 模型，零依赖零花费）。
 PY ?= .venv/bin/python
 UV_CACHE_DIR ?= .uv-cache
 export UV_CACHE_DIR
@@ -40,8 +39,8 @@ doctor:  ## 自检：依赖、权限、配置、屏幕
 screenshot:  ## 抓一张当前屏幕到 runs/，用于确认权限
 	$(PY) -m yu_agent screenshot
 
-demo:  ## 用 mock 环境 + mock 模型跑一遍完整循环（零依赖、零花费）
-	$(PY) examples/run_mock_demo.py
+demo:  ## 用 mock 模型跑一遍完整循环（零依赖、零花费、不需要 API key）
+	$(PY) -m yu_agent test "打开浏览器"
 
 gui:  ## 启动图形化界面
 	$(PY) -m yu_agent gui
