@@ -11,6 +11,16 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .a11y import UIElement, get_all_interactive_elements, label_language, set_label_language
 
+# 框的颜色（给模型看的两条通道，颜色不同，含义不同）：
+# 红 = AX 元素（有角色/名字，能覆盖图标按钮），蓝 = OCR 补的文字（AX 盲区兜底）。
+# 蓝色是用户实测「位置准」的那套，别随便改；改了就同步改提示词里的说明。
+_COLOR_APP = (220, 24, 24)
+_COLOR_OCR = (24, 92, 220)
+
+# 菜单栏高度（逻辑像素）：OCR 标注时这一段整条跳过，
+# 否则「文件 编辑 显示 历史 书签」会占掉十几个编号，实际几乎用不到。
+_MENUBAR_SKIP_H = 26.0
+
 # 这些角色的 AX 矩形经常比「眼睛看到的东西」大很多（盒子含 padding、甚至整行宽），
 # 用截图像素把它们收缩到真实内容上。按钮/输入框不在其中：它们的 AX 矩形本来就够准，
 # 收缩反而会把点击区弄小。
@@ -171,7 +181,7 @@ class MarkStabilizer:
             self._map.pop(k, None)
             self._age.pop(k, None)
 
-        return [int(n) for n in nums]
+        return [int(n) for n in nums if n is not None]
 
     def known_number(self, el: UIElement) -> Optional[int]:
         """这个元素上次的编号（没出现过则为 None）。"""
@@ -288,6 +298,9 @@ def draw_marks(
         if el.x * coord_scale < W and el.y * coord_scale < H
         and (el.x + el.w) * coord_scale > 0 and (el.y + el.h) * coord_scale > 0
     ]
+    if len(visible) < len(elements):
+        # 画不出来 ≠ 没识别到：记进审计，解释「识别 36 个为什么图上只有 33 个」
+        _a11y.bump_audit("dropped_offscreen", len(elements) - len(visible))
     numbers = stabilizer.assign(visible) if stabilizer else list(range(1, len(visible) + 1))
 
     # ── 阶段 1：先算好每个元素的最终矩形 ────────────────────────────
@@ -326,13 +339,13 @@ def draw_marks(
     # 否则列表行里的编号会小到模型认不出来，或者大到自己压住邻居。
     label_size = max(11, min(14, int(img.size[0] / 120)))
     font = _load_font(label_size)
-    color = (220, 24, 24)
 
     mapping: Dict[int, UIElement] = {}
     occupied: List[Tuple[float, float, float, float]] = []
 
     for num, el, rect, info in plan:
         x0, y0, x1, y1 = rect
+        color = _COLOR_OCR if el.kind == "ocr" else _COLOR_APP
 
         # 框里没有任何画面内容的「容器/文字」元素：画出来只会误导模型
         # （这正是「框罩在空白处、一个叠一个」的主要来源）。
@@ -376,6 +389,11 @@ def draw_marks(
 
         mapping[num] = el
 
+    # 审计快照要在这里刷新：枚举阶段（a11y）存的那份是画框**之前**的，
+    # 不含「空框丢弃 / 屏幕外」这些画框时才发生的数量，用户会看到
+    # 「保留 36 个，图上只有 33 个，差 3 个没人解释」。
+    _a11y.last_stats["audit"] = _a11y.audit()
+
     return marked, mapping
 
 
@@ -404,6 +422,10 @@ def build_som_mapping(
     draw: bool = True,
     content_check: bool = True,
     shrink: bool = True,
+    use_ocr: bool = False,
+    ocr_max: int = 30,
+    ocr_min_conf: float = 0.30,
+    elements: Optional[List[UIElement]] = None,
 ) -> Tuple[Image.Image, Dict[int, UIElement], List[UIElement]]:
     """完整流程：枚举元素 -> 画标记 -> 返回 (标记图, 映射, 元素列表)。
 
@@ -412,24 +434,96 @@ def build_som_mapping(
     skip_menubar: 是否跳过菜单栏项（绝大多数任务用不到，且极占编号）。
     draw: False 时只枚举 + 分配编号，不往图上画（用于「纯坐标模式」的坐标吸附）。
     content_check / shrink: 用截图像素校验并收缩元素框（见 draw_marks）。
+    use_ocr: 用 OCR 补标注（蓝色框）。AX 读不到的界面——Electron/网页/自绘/
+             没给辅助功能权限的应用——只有这条路能画出框。约 0.3s/帧。
+    ocr_max / ocr_min_conf: OCR 补标注的数量上限与置信度下限。
+    elements: **外部注入的目标列表**（网页三模态融合的结果，见 perception/web/）。
+              给了就不再枚举原生 AX —— 网页里 DOM/AX/OCR 已经在 `fusion` 里合成过了，
+              再叠一层原生 AX 只会把浏览器自己的工具栏混进来。
     """
     if language:
         set_label_language(language)
-    elements = get_all_interactive_elements(
-        max_elements, dock_max=dock_max, max_apps=max_apps, skip_menubar=skip_menubar
-    )
+    if elements is None:
+        elements = get_all_interactive_elements(
+            max_elements, dock_max=dock_max, max_apps=max_apps, skip_menubar=skip_menubar
+        )
+        if use_ocr:
+            elements = _merge_ocr_elements(
+                img, elements, coord_scale=coord_scale,
+                skip_menubar=skip_menubar, ocr_max=ocr_max, ocr_min_conf=ocr_min_conf,
+                max_apps=max_apps,
+            )
+    else:
+        elements = list(elements)[: max_elements or len(elements)]
     if not draw:
         visible = [
             el for el in elements
             if el.x * coord_scale < img.size[0] and el.y * coord_scale < img.size[1]
         ]
         numbers = stabilizer.assign(visible) if stabilizer else list(range(1, len(visible) + 1))
-        return img, {n: el for n, el in zip(numbers, visible)}, elements
+        return img, dict(zip(numbers, visible)), elements
     marked, mapping = draw_marks(
         img, elements, coord_scale=coord_scale, stabilizer=stabilizer,
         content_check=content_check, shrink=shrink,
     )
     return marked, mapping, elements
+
+
+def _merge_ocr_elements(
+    img: Image.Image,
+    elements: List[UIElement],
+    *,
+    coord_scale: float = 1.0,
+    skip_menubar: bool = True,
+    ocr_max: int = 30,
+    ocr_min_conf: float = 0.30,
+    max_apps: int = 1,
+) -> List[UIElement]:
+    """把 OCR 文字补进元素列表（AX 元素在前，OCR 元素在后）。
+
+    ⚠️ 必须在**未画框的干净截图**上跑 OCR：画上去的红色编号会被识别成文字，
+    变成「#7」「#12」混进编号表，模型会照着这些假编号点。
+
+    三条规则（都在 ocr_marks 里实现，这里只负责串联）：
+    1. AX 元素没名字 → 用框里的 OCR 文字补名字（工具栏纯图标按钮）；
+    2. 已经有 AX 框盖住的文字 → 不重复编号；
+    3. 剩下的才是 AX 盲区，用蓝色框补上。
+    """
+    from . import ocr_marks
+
+    boxes = ocr_marks.recognize_boxes(img, min_conf=ocr_min_conf)
+    if not boxes:
+        return elements
+    elements = ocr_marks.fill_titles(elements, boxes, coord_scale=coord_scale)
+    extra = ocr_marks.elements_from_boxes(
+        boxes,
+        coord_scale=coord_scale,
+        max_boxes=ocr_max,
+        skip_top_px=(_MENUBAR_SKIP_H * coord_scale) if skip_menubar else 0.0,
+        allow_rects=_target_window_rects(max_apps),
+    )
+    extra = ocr_marks.drop_covered(extra, elements)
+    return elements + extra
+
+
+def _target_window_rects(max_apps: int) -> List[Tuple[float, float, float, float]]:
+    """OCR 允许出现在哪些窗口里（逻辑像素）。
+
+    `som_frontmost_only` 的语义是「只标最前面的应用」，OCR 也必须守同一条规矩：
+    否则背景窗口的标题、聊天记录、网页正文全被编号，模型会跑去点那些点不到的地方。
+    拿不到窗口列表时返回空列表 = 不做限制（宁可多标，也别把界面全禁了）。
+    """
+    from . import a11y as _a11y
+
+    try:
+        windows = _a11y._on_screen_windows()
+        if not windows:
+            return []
+        order = _a11y._ordered_app_pids(windows, max_apps=max(1, max_apps))
+        keep = set(order[:1]) if max_apps <= 1 else set(order)
+        return [_a11y._rect_of(w) for w in windows if w["pid"] in keep]
+    except Exception:
+        return []
 
 
 def _short_label(text: str, limit: int = 48) -> str:
@@ -455,6 +549,7 @@ def describe_marks(mapping: Dict[int, UIElement], language: str = "") -> str:
         set_label_language(language)
     en = str(language or label_language()).strip().lower().startswith("en")
     dock_key = "dock" if en else "程序坞"
+    ocr_key = "screen text (OCR)" if en else "屏幕文字(OCR)"
     if not mapping:
         return "(no markable elements found)" if en else "（当前没有识别到可标记的元素）"
 
@@ -463,7 +558,13 @@ def describe_marks(mapping: Dict[int, UIElement], language: str = "") -> str:
     index: Dict[str, int] = {}
     for num in sorted(mapping.keys()):
         el = mapping[num]
-        key = dock_key if el.kind == "dock" else (el.app or ("app" if en else "应用"))
+        if el.kind == "dock":
+            key = dock_key
+        elif el.kind == "ocr":
+            # OCR 单独一组：这些框只有文字、没有控件语义，模型要知道来路
+            key = ocr_key
+        else:
+            key = el.app or ("app" if en else "应用")
         if key not in index:
             index[key] = len(groups)
             groups.append((key, []))
@@ -482,6 +583,13 @@ def describe_marks(mapping: Dict[int, UIElement], language: str = "") -> str:
                 f"(click only to open/switch apps)"
                 if en else f"【程序坞】{len(nums)} 个图标：{nums_txt}"
                           f"（仅在需要打开/切换应用时用）"
+            )
+        elif name == ocr_key:
+            lines.append(
+                f"[{name}] {len(nums)}: {nums_txt} (blue boxes; text found by OCR on "
+                f"the pixels — use them when a control has no red box)"
+                if en else f"【{name}】{len(nums)} 个：{nums_txt}"
+                          f"（蓝色框，由 OCR 从像素里识别出来的文字；红框没有覆盖的控件用它们点）"
             )
         else:
             lines.append(

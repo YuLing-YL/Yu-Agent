@@ -14,7 +14,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from PIL import Image
 
-from yu_agent.actions.schema import Action
 from yu_agent.grounding.parser import parse_action
 from yu_agent.perception import a11y
 from yu_agent.perception.a11y import UIElement, _drop_noise, _split_offscreen
@@ -212,8 +211,8 @@ def _make_loop(**cfg):
             self.i += 1
             return VLMResponse(text=s)
 
-    import yu_agent.agent.loop as loopmod
     import yu_agent.actions.executor as exmod
+    import yu_agent.agent.loop as loopmod
 
     saved = (loopmod.capture_screen, loopmod.get_screen_size, loopmod.build_som_mapping,
              exmod.ActionExecutor.execute)
@@ -224,10 +223,6 @@ def _make_loop(**cfg):
     def fake_som(img, *a, **k):
         calls["som"] += 1
         e = el("智能搜索栏", 900, 60, 300, 30, role="AXTextField", app="Safari")
-        from yu_agent.perception.som import MarkStabilizer as _MS
-        stab = k.get("stabilizer") or _MS()
-        if k.get("draw", True):
-            return img, {1: e}, [e]
         return img, {1: e}, [e]
 
     loopmod.build_som_mapping = fake_som

@@ -14,6 +14,11 @@
    现在上限可配置（默认 30），并且用递归遍历替代「Dock->AXList->children」的脆弱路径。
 4. 早期会把「覆盖整屏/整条菜单栏」的巨型容器也标成可点元素（截图上出现一个巨大的
    红框，白占编号还误导模型）。现在会过滤掉超大元素与菜单栏上的状态区容器。
+5. **Chromium/Electron 默认不建网页无障碍树**（Chrome/Edge/VS Code/Slack/飞书…）。
+   不主动设置 `AXManualAccessibility` / `AXEnhancedUserInterface`，网页区只会给一个
+   空的 AXWebArea：地址栏之外一个框都画不出来。见 `_open_web_accessibility`。
+6. 元素预算早期不看枚举了几个应用，一律只给前台一半 → 60 个预算里前台只拿到 20 个编号，
+   这才是用户看到的「标注不全」。见 `_app_budgets`（n<=1 时全部预算给前台）。
 """
 from __future__ import annotations
 
@@ -130,7 +135,9 @@ _NESTED_ROLES = {"AXRow", "AXCell", "AXListItem", "AXOutlineRow", "AXColumn", "A
 
 # 完全没标签的「图标类」元素：每个应用最多保留几个（工具栏/窗口装饰往往一大堆）
 _UNNAMED_ICON_ROLES = {"AXImage", "AXButton", "AXToolbarButton"}
-_UNNAMED_ICON_MAX = 8
+# 8 实测不够：WPS / 微信这种工具栏图标密集的应用，右侧面板那一列图标全被砍掉，
+# 图上看着「明明有按钮却没编号」。放到 12，同时把丢弃数量记进审计（能解释、能调）。
+_UNNAMED_ICON_MAX = 12
 
 # 角色中文名（写进给模型的编号表，让模型更容易理解）
 _ROLE_ZH: Dict[str, str] = {
@@ -146,6 +153,7 @@ _ROLE_ZH: Dict[str, str] = {
     "AXIncrementor": "步进器", "AXStepper": "步进器", "AXColorWell": "取色器",
     "AXDisclosureTriangle": "展开三角",
     "AXDockItem": "程序坞图标", "程序坞图标": "程序坞图标",
+    "OCR文字": "文字(OCR)",
 }
 
 # 角色英文名（提示词语言为 en 时用这套，避免英文提示词里混中文角色词）
@@ -199,8 +207,44 @@ _SYSTEM_PROCESSES = {
 # 注意：自身窗口仍然会作为「遮挡物」参与遮挡计算，只是不作为枚举目标。
 _EXCLUDED_PIDS: set = set()
 
+# 已经打开过「网页无障碍」的 pid（属性是粘性的，每个进程设一次就够）
+_WEB_AX_OPENED: set = set()
+
+
+def _open_web_accessibility(app, pid: int) -> None:
+    """让 Chromium/Electron 把**网页内容**也暴露到 AX 树里。
+
+    ⚠️ 这是「浏览器里标注不全」最常见的原因，而且非常隐蔽：
+    Chrome / Edge / VS Code / Slack / 飞书 / 微信内置浏览器这类基于 Chromium 的应用，
+    **默认不构建网页的无障碍树**（性能考虑）。此时 `AXWebArea` 存在但 children 是空的，
+    枚举出来只有窗口边框和地址栏，网页里的按钮/链接/输入框一个都标不到，
+    模型看到的是一张「只有几个红框」的截图。
+    打开方式就是给应用级 AX 元素设置这两个属性之一（不同版本认不同的名字）：
+    - `AXManualAccessibility`（Chromium 87+ 的懒加载开关）
+    - `AXEnhancedUserInterface`（老的 VoiceOver 兼容开关，部分 Electron 版本只认这个）
+
+    属性对进程是粘性的：设一次之后新窗口也会带完整树，所以按 pid 缓存。
+    失败一律忽略——不支持这两个属性的原生应用只会返回错误码，没有副作用。
+    """
+    if pid in _WEB_AX_OPENED:
+        return
+    _WEB_AX_OPENED.add(pid)
+    try:
+        import ApplicationServices as AX
+    except Exception:
+        return
+    for attr in ("AXManualAccessibility", "AXEnhancedUserInterface"):
+        try:
+            AX.AXUIElementSetAttributeValue(app, attr, True)
+        except Exception:
+            continue
+
 # 上一次枚举的诊断信息（供日志/排障使用）
 last_stats: Dict[str, Any] = {}
+
+# 每个应用「原始候选元素数」（AX 树里点得动的东西有多少），用于解释标注为什么少：
+# 保留数 = 原始候选 - 去重 - 空框 - 窗口外 - 无名图标上限 - 预算截断。
+_app_raw_counts: Dict[int, int] = {}
 
 # 本次枚举的审计计数（空框/窗口外/收缩等），由 som 层继续累加
 _audit: Dict[str, int] = {}
@@ -212,6 +256,11 @@ def reset_audit() -> None:
     for k in (
         "dropped_outside_window",
         "dropped_empty",
+        "dropped_unnamed",
+        "dropped_noise",
+        "dropped_offscreen",
+        "merged",
+        "truncated_by_limit",
         "shrunk",
         "total_candidates",
     ):
@@ -239,12 +288,29 @@ _MENUBAR_H = 32
 _MENUBAR_MAX_ITEM_W = 260
 # 最多枚举几个应用（太多会淹没模型，也会拖慢速度）
 _MAX_APPS = 6
-# 单个元素的遍历深度
-_MAX_DEPTH = 18
+# 单个元素的遍历深度。网页/DOM 树的层级比原生控件深得多（body > div > div > ...
+# 十几层很常见），18 层实测会把网页深处的按钮整片切掉，这里放到 24。
+_MAX_DEPTH = 24
+# 单个应用最多收集多少个**原始候选**（0 = 不限制，按预算自动放大）。
+# 巨型网页/巨大的电子表格能枚举出几千个节点，一帧就卡住十几秒；需要时可用配置收紧。
+_MAX_APP_ELEMENTS = 0
 # 元素中心离「自己应用的所有窗口」都超过这个距离，才认定是幽灵元素（坐标已失效）。
 # 取大一点是故意的：窗口阴影/圆角/多显示器负坐标都会造成几十像素的误差，
 # 宁可多标一个错位的框，也不要一次丢掉半个应用的可点元素。
 _GHOST_DISTANCE = 160.0
+
+
+def configure(max_depth: int = 0, max_elements: int = 0) -> None:
+    """由上层（agent_facade）注入 perception 段的枚举上限。
+
+    这两个值以前只写在 config 里、代码从来不读；接线后它们是真旋钮：
+    `a11y_max_depth` 控递归深度，`a11y_max_elements` 控单应用候选上限（0=不限）。
+    """
+    global _MAX_DEPTH, _MAX_APP_ELEMENTS
+    if max_depth and int(max_depth) > 0:
+        _MAX_DEPTH = int(max_depth)
+    if max_elements is not None:
+        _MAX_APP_ELEMENTS = max(0, int(max_elements))
 
 
 def set_excluded_pids(pids) -> None:
@@ -844,15 +910,22 @@ def _cap_unnamed_icons(
 
     工具栏图标/窗口装饰往往一大堆、都没标签（AXImage / AXButton），
     全标出来只会把真正有用的按钮挤出编号表。这条对所有应用通用。
+
+    被砍掉的数量记进审计（`dropped_unnamed`）：用户看到「标注不全」时，
+    这个数字能直接回答「是上限砍的，不是没识别到」。
     """
     left = budget
     out: List[UIElement] = []
+    dropped = 0
     for el in elements:
         if not el.title and el.role in _UNNAMED_ICON_ROLES:
             if left <= 0:
+                dropped += 1
                 continue
             left -= 1
         out.append(el)
+    if dropped:
+        bump_audit("dropped_unnamed", dropped)
     return out
 
 
@@ -908,8 +981,15 @@ def _app_elements(
     import ApplicationServices as AX
 
     app = AX.AXUIElementCreateApplication(pid)
+    # 关键前置：Chromium 系应用默认不建网页无障碍树，不打开就只能标到窗口边框
+    _open_web_accessibility(app, pid)
     raw: List[UIElement] = []
-    _walk(app, raw, 0, max(limit * 6, 400), screen, app_name)
+    # 原始候选上限：缺省按预算放大（至少 600），可用 perception.a11y_max_elements 收紧
+    raw_limit = max(limit * 8, 600)
+    if _MAX_APP_ELEMENTS:
+        raw_limit = min(raw_limit, _MAX_APP_ELEMENTS)
+    _walk(app, raw, 0, raw_limit, screen, app_name)
+    _app_raw_counts[pid] = len(raw)
 
     # AX 坐标 -> 点击坐标（大多数机器偏移为 0，只在确实有偏移时才平移）
     dx, dy = calib
@@ -918,8 +998,12 @@ def _app_elements(
             el.x += dx
             el.y += dy
 
+    n_before = len(raw)
     raw = _dedupe(raw)
     raw = _dedupe_by_rect(raw)  # 「行→单元格→文字」套娃合并成一个
+    if n_before > len(raw):
+        # 合并不是丢东西：同一块矩形只留一个编号（套娃元素点了结果一样）
+        bump_audit("merged", n_before - len(raw))
 
     kept: List[UIElement] = []
     ghosts: List[UIElement] = []
@@ -955,17 +1039,40 @@ def _app_elements(
         bump_audit("dropped_outside_window", len(ghosts))
 
     # 降噪：菜单栏项 / 点不中的细小元素 / 无标签且禁用 / 全屏容器
+    n_noise = len(kept)
     kept = _drop_noise(kept, skip_menubar=skip_menubar)
+    if n_noise > len(kept):
+        bump_audit("dropped_noise", n_noise - len(kept))
 
     # 按角色优先级裁剪：输入框/按钮优先于装饰性文字
     kept.sort(key=lambda e: (_ROLE_PRIORITY.get(e.role, 9), e.w * e.h))
 
     # 完全没标签的图标（窗口装饰、工具栏图标）数量经常很多，
     # 全标出来只会淹没模型：每个应用最多留 _UNNAMED_ICON_MAX 个。
-    kept = _cap_unnamed_icons(kept)[:limit]
+    kept = _cap_unnamed_icons(kept)
+    if len(kept) > limit:
+        bump_audit("truncated_by_limit", len(kept) - limit)
+        kept = kept[:limit]
 
     kept.sort(key=lambda e: (round(e.y / 12), e.x))
     return kept
+
+
+def _app_budgets(app_budget: int, n: int) -> List[int]:
+    """把元素预算分给 n 个可见应用（第一个是前台）。
+
+    ⚠️ n<=1 时**全部**预算都给这个应用。早期这里不看 n，一律只给一半
+    （`max(15, int(app_budget * 0.5))`），于是 60 个预算里前台只拿到 20 个编号，
+    剩下 40 个白白浪费——这就是「标注不全」最直接的来源：窗口里明明有 50 多个
+    可点元素，图上却只画了 20 个框，其它全让模型去猜像素坐标。
+    """
+    if n <= 0:
+        return []
+    if n == 1:
+        return [max(1, app_budget)]
+    front = max(15, int(app_budget * 0.55))
+    others = max(8, (app_budget - front) // (n - 1))
+    return [front] + [others] * (n - 1)
 
 
 def get_all_interactive_elements(
@@ -1018,12 +1125,7 @@ def get_all_interactive_elements(
     # 注意：只枚举 1 个应用（清场模式）时也要按「前台预算」封顶，
     # 否则单个应用会吃掉全部预算（实测从 46 个涨到 74 个，编号反而更乱）。
     n = len(order)
-    front_cap = max(15, int(app_budget * 0.5))
-    if n <= 1:
-        caps = [front_cap] if n else []
-    else:
-        others = max(8, (app_budget - front_cap) // (n - 1))
-        caps = [front_cap] + [others] * (n - 1)
+    caps = _app_budgets(app_budget, n)
 
     elements: List[UIElement] = []
     occluders = list(own_rects)
@@ -1039,7 +1141,15 @@ def get_all_interactive_elements(
             is_frontmost=(i == 0), skip_menubar=skip_menubar,
             win_rects=win_rects, calib=calib,
         )
-        per_app.append({"pid": pid, "name": name, "elements": len(kept)})
+        per_app.append(
+            {
+                "pid": pid,
+                "name": name,
+                "elements": len(kept),
+                "raw": int(_app_raw_counts.get(pid) or 0),
+                "cap": cap,
+            }
+        )
         elements.extend(kept)
         # 这个应用的所有窗口都会挡住它后面的应用
         occluders.extend(win_rects)

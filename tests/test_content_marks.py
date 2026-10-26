@@ -20,8 +20,8 @@ from PIL import Image, ImageDraw
 from yu_agent.actions.schema import Action
 from yu_agent.perception import a11y
 from yu_agent.perception.a11y import UIElement, _clip_rect_to, _dist_to_rect
-from yu_agent.perception.content import _EDGE_DIFF, content_info, shrink_box
-from yu_agent.perception.som import MarkStabilizer, _label_anchor, draw_marks
+from yu_agent.perception.content import content_info, shrink_box
+from yu_agent.perception.som import MarkStabilizer, draw_marks
 
 
 def _scene() -> Image.Image:

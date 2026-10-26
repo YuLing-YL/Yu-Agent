@@ -72,13 +72,17 @@ Every step you must output **exactly one JSON object** (no prose, no markdown fe
 {"type": "action_type", "x": 0, "y": 0, "text": "", "reason": "why you do this"}
 ```
 
-**When the screenshot has red numbered boxes (SOM marks)**, prefer the mark to identify the target:
+**When the screenshot has numbered boxes (SOM marks)**, prefer the mark to identify the target:
 
 ```json
 {"type": "click", "mark": 5, "reason": "click the element marked 5"}
 ```
 
-- `mark` is the red number in the top-left corner of the box; the number → element mapping is listed in the message.
+- `mark` is the number in the top-left corner of the box; the number → element mapping is listed in the message.
+- **Red box** = element read from the app's accessibility tree (has a role and a name; covers buttons, icons and input fields).
+- **Blue box** = text found by OCR on the pixels (`screen text (OCR)` group). Apps like Electron/web
+  pages draw their UI themselves, so they have no red boxes — the blue ones are the only exact
+  handles there. Click them exactly like red ones: `mark` is enough.
 - Use `x`/`y` pixel coordinates only when the target is **not** in the numbered list
   (e.g. clicking empty space, or opening an app first).
 
