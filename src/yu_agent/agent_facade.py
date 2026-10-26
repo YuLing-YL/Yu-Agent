@@ -4,16 +4,85 @@ GUI 和 CLI 都通过这个类启动 agent，避免重复组装逻辑。
 """
 from __future__ import annotations
 
-import sys
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from .agent import AgentLoop
 from .common.errors import ConfigError
 from .common.logging import setup_logging
+from .common.paths import project_root
 from .memory import MemoryManager
+from .memory.store import MemoryStore
 from .models.registry import get_backend
+from .perception import a11y as a11y_mod
+from .settings import ModelConfig, Settings, get_settings, reload_settings
 from .skills import build_default_registry
-from .settings import ModelConfig, get_settings, reload_settings
+
+
+def _resolve_path(p: str) -> Path:
+    """配置里的路径：相对路径按项目根解析，绝对路径原样。"""
+    path = Path(p).expanduser()
+    return path if path.is_absolute() else (project_root() / path)
+
+
+def _loop_config(settings: Settings) -> Dict[str, Any]:
+    """把 Settings 摊平成 AgentLoop 认识的 dict。
+
+    只在这里做一次映射：loop 不知道配置长什么样，配置改了也不用动 loop。
+    """
+    agent, loop = settings.agent, settings.loop
+    return {
+        # 步数 / 超时 / 失败容忍
+        "max_steps": agent.max_steps,
+        "step_timeout_s": agent.step_timeout_s,
+        "task_timeout_s": agent.task_timeout_s,
+        "max_consecutive_failures": agent.max_consecutive_failures,
+        "stop_on_grounding_error": agent.stop_on_grounding_error,
+        # 校验
+        "verify_after_action": loop.verify_after_action,
+        "verify_delay_s": loop.verify_delay_s,
+        "screenshot_diff_threshold": loop.screenshot_diff_threshold,
+        # 图像
+        "max_image_side": settings.perception.max_image_side,
+        "use_som": settings.perception.use_som,
+        # SOM / OCR
+        "som_mode": agent.som_mode,
+        "som_max_marks": agent.som_max_marks,
+        "som_dock_max_marks": loop.som_dock_max_marks,
+        "som_max_apps": loop.som_max_apps,
+        "som_frontmost_only": agent.som_frontmost_only,
+        "som_content_check": agent.som_content_check,
+        "som_ocr": loop.som_ocr,
+        "som_ocr_max": loop.som_ocr_max,
+        "som_ocr_min_conf": loop.som_ocr_min_conf,
+        "som_ocr_skip_ax_elements": loop.som_ocr_skip_ax_elements,
+        # 运行记录
+        "save_trace": loop.save_trace,
+        "runs_keep": loop.runs_keep,
+        "redact_secrets": settings.safety.redact_secrets_in_traces,
+        # 防卡死
+        "max_repeated_actions": agent.max_repeated_actions,
+        "max_same_action_total": agent.max_same_action_total,
+        "max_same_action_total_other": agent.max_same_action_total_other,
+        "max_total_clicks": agent.max_total_clicks,
+        "max_no_change_steps": agent.max_no_change_steps,
+        "max_plan_rejects": agent.max_plan_rejects,
+        "type_interval_s": agent.type_interval_s,
+        # 结果复核 / 重规划 / 成本
+        "verify_goal": loop.verify_goal,
+        "max_goal_rejects": loop.max_goal_rejects,
+        "max_replans": loop.max_replans,
+        "ocr_anchor": loop.ocr_anchor,
+        "require_approval_for_risky": loop.require_approval_for_risky,
+        "model_pricing": dict(loop.model_pricing or {}),
+        # 安全
+        "forbidden_actions": list(settings.safety.forbidden_action_types or []),
+        "deny_shell": settings.safety.deny_shell_by_default,
+        # 定位
+        "text_match_threshold": settings.grounding.text_match_threshold,
+        "prefer_a11y_over_pixels": settings.grounding.prefer_a11y_over_pixels,
+        "coords_mode": settings.grounding.coords_mode,
+    }
 
 
 class YuAgent:
@@ -48,47 +117,28 @@ class YuAgent:
                 )
             self.backend = get_backend(model_config, model_config.provider)
 
-        # 记忆
-        self.memory = memory or MemoryManager(enabled=settings.memory.get("enabled", True))
+        # 记忆：路径来自 memory.sqlite_path（相对项目根解析）
+        if memory is not None:
+            self.memory = memory
+        else:
+            store = MemoryStore(db_path=str(_resolve_path(settings.memory.sqlite_path)))
+            self.memory = MemoryManager(store=store, enabled=settings.memory.enabled)
 
         # 技能
         self.skill_registry = build_default_registry()
+
+        # 感知上限（config 里写明、但以前没人读的两个旋钮）
+        a11y_mod.configure(
+            max_depth=settings.perception.a11y_max_depth,
+            max_elements=settings.perception.a11y_max_elements,
+        )
 
         # 主循环
         self.loop = AgentLoop(
             backend=self.backend,
             memory=self.memory,
             skill_registry=self.skill_registry,
-            config={
-                "max_steps": settings.agent.max_steps,
-                "max_consecutive_failures": settings.agent.max_consecutive_failures,
-                "verify_after_action": settings.loop.get("verify_after_action", True),
-                "verify_delay_s": settings.loop.get("verify_delay_s", 0.5),
-                "screenshot_diff_threshold": settings.loop.get("screenshot_diff_threshold", 0.002),
-                "max_image_side": settings.perception.get("max_image_side", 1568),
-                "use_som": settings.perception.get("use_som", True),
-                "som_max_marks": settings.agent.som_max_marks,
-                "som_dock_max_marks": settings.loop.get("som_dock_max_marks", 20),
-                "som_max_apps": settings.loop.get("som_max_apps", 6),
-                "som_mode": settings.agent.som_mode,
-                "som_frontmost_only": settings.agent.som_frontmost_only,
-                "max_repeated_actions": settings.agent.max_repeated_actions,
-                "max_same_action_total": settings.agent.max_same_action_total,
-                "max_same_action_total_other": settings.agent.max_same_action_total_other,
-                "max_total_clicks": settings.agent.max_total_clicks,
-                "max_no_change_steps": settings.agent.max_no_change_steps,
-                "max_plan_rejects": settings.agent.max_plan_rejects,
-                "type_interval_s": settings.agent.type_interval_s,
-                # 结果复核 / 重规划 / 成本单价（都可在 config 里关掉或调）
-                "verify_goal": settings.loop.get("verify_goal", True),
-                "max_goal_rejects": settings.loop.get("max_goal_rejects", 1),
-                "max_replans": settings.loop.get("max_replans", 1),
-                "ocr_anchor": settings.loop.get("ocr_anchor", True),
-                "require_approval_for_risky": settings.loop.get(
-                    "require_approval_for_risky", True
-                ),
-                "model_pricing": settings.loop.get("model_pricing") or {},
-            },
+            config=_loop_config(settings),
             dry_run=dry_run,
             callback=callback,
             control=control,
@@ -122,7 +172,6 @@ def build_test_agent(callback=None, dry_run: bool = True) -> YuAgent:
 
     供测试脚本 / pytest 使用，与生产 GUI 完全解耦。
     """
-    from .memory.store import MemoryStore
     from .models.mock import MockBackend
 
     memory = MemoryManager(store=MemoryStore(db_path=":memory:"))

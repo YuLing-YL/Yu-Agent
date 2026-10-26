@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import base64
 import io
-from typing import Tuple
+from typing import Tuple, cast
 
 from PIL import Image
+
+# Pillow 9 → 10 把重采样常量挪进了 Image.Resampling，顶层 Image.LANCZOS
+# 只是兼容别名（且没有类型声明）。项目要求 Pillow>=10，直接用新路径。
+_LANCZOS = Image.Resampling.LANCZOS
 
 
 def scale_image(img: Image.Image, max_side: int) -> Image.Image:
@@ -16,7 +20,7 @@ def scale_image(img: Image.Image, max_side: int) -> Image.Image:
         return img
     ratio = max_side / longest
     new_size = (int(w * ratio), int(h * ratio))
-    return img.resize(new_size, Image.LANCZOS)
+    return img.resize(new_size, _LANCZOS)
 
 
 def scale_factor(img: Image.Image, scaled: Image.Image) -> Tuple[float, float]:
@@ -55,10 +59,38 @@ def image_diff_ratio(a: Image.Image, b: Image.Image) -> float:
 
 def average_hash(img: Image.Image, size: Tuple[int, int] = (16, 16)) -> int:
     """感知哈希（用于记忆里去重 / 判断是否回到相同界面）。"""
-    g = img.convert("L").resize(size, Image.LANCZOS)
+    g = img.convert("L").resize(size, _LANCZOS)
     pixels = list(g.getdata())
     avg = sum(pixels) / len(pixels)
     bits = 0
     for p in pixels:
         bits = (bits << 1) | (1 if p > avg else 0)
     return bits
+
+
+def is_blank(img: Image.Image, tolerance: int = 8) -> bool:
+    """整张图是不是「一片纯色」（通常就是纯黑）。
+
+    为什么需要：屏幕锁定 / 显示器休眠 / 没给录屏权限时，Quartz 抓到的是一张
+    **全黑图** —— 不报错、不抛异常，模型看到黑屏然后照着黑屏瞎点。
+    用户事后翻 `runs/` 只看到一堆黑图，会以为是保存坏了。
+    这里用 `getextrema()`（C 实现，几毫秒）判断，命中就明确告诉用户原因。
+
+    tolerance: 每个通道允许的抖动（压暗的壁纸不是严格 0）。
+    """
+    if img is None:
+        return True
+    try:
+        # convert("RGB") 之后 getextrema() 一定返回 3 组 (min,max)；
+        # stub 把它标成「单通道 tuple 或嵌套 tuple」的联合类型，这里显式收窄。
+        ext = cast("Tuple[Tuple[int, int], ...]", img.convert("RGB").getextrema())
+    except Exception:
+        return False
+    # 纯色的判据：每个通道的 max-min 都很小，并且整体落在黑端或白端。
+    # （不能用 max-min 大就判"有内容"——那正好是反的，早期写反过一次。）
+    for lo, hi in ext:
+        if hi - lo > tolerance:
+            return False
+        if lo > tolerance and hi < 255 - tolerance:
+            return False
+    return True

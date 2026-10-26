@@ -1,12 +1,15 @@
-# 默认配置。真正的实验参数请放到 config/experiments/*.yaml 里覆盖，
+# 默认配置。用户覆盖放 data/config/user.yaml（GUI 设置页写入），优先级：
+# 环境变量 > user.yaml > default.yaml
 # 密钥一律走环境变量（见 .env.example），不要写在这个文件里。
+#
+# ⚠️ 键名拼写错误会在启动时直接报错（pydantic extra="forbid"），不会再静默失效。
 
 agent:
   max_steps: 20              # 单个任务最多多少步
-  step_timeout_s: 60         # 单步（含模型调用）超时
-  task_timeout_s: 900        # 单任务总超时
+  step_timeout_s: 60         # 单步超时：超过即记一次超时（模型调用自身另有 HTTP timeout）
+  task_timeout_s: 900        # 单任务总超时：到点强制收尾
   max_consecutive_failures: 3
-  # ── 防重复 / 防卡死（避免「一直点击停不下来」）──
+  # ── 防重复 / 防卡死（避免「一直点停不下来」）──
   max_repeated_actions: 3      # 连续多少次完全相同的动作判定卡住并自动停止
   max_same_action_total: 3     # 同一个目标（位置）累计被点击多少次判定卡住
   max_same_action_total_other: 8   # 同一按键/滚动等动作累计上限（合法连续操作放宽）
@@ -14,16 +17,16 @@ agent:
   max_no_change_steps: 3       # 屏幕连续无变化多少次判定卡住并自动停止
   max_plan_rejects: 2          # 反复「拆分子任务」却不执行任何操作多少次判定死循环并停止
   type_interval_s: 0.02        # 逐字输入时每个字符的间隔（只影响 ASCII；中文走剪贴板粘贴）
+  stop_on_grounding_error: true  # 定位失败（GroundingError）时立刻终止；false 则交给失败计数
   # ── 元素标注（SOM）──
   # marks  = 截图上画编号框，模型输出编号（默认，点击最准）
   # coords = 不画框，模型直接给像素坐标（坐标会吸附到最近的元素中心）
   # off    = 完全不枚举元素，纯看图给坐标（最省 token，但最容易点偏）
   som_mode: marks
-  som_max_marks: 60            # 单帧最多标多少个元素（太多会重叠，模型反而看不过来）
+  som_max_marks: 80            # 单帧最多标多少个元素（含程序坞；60 实测会截断 Electron 应用 59 个）
   som_frontmost_only: true     # 只标「最前面的应用 + 程序坞」，背景窗口的按钮不标
   som_content_check: true      # 用截图像素校准元素框：空框丢弃、过大的框收缩到真实内容
-  stop_on_grounding_error: true   # 定位失败时是否直接终止（false 则交给反思重试）
-  dry_run: false             # true = 只规划不执行（安全调试）
+  dry_run: false               # true = 只规划不执行（安全调试）
 
 prompts:
   # 提示词语言：en = 英文（默认，token 更省、指令遵循通常更稳）；zh = 中文
@@ -31,13 +34,6 @@ prompts:
   language: en
 
 loop:
-  history_window: 8          # 塞进 prompt 的最近步数
-  include_a11y: true         # 观察时是否读取辅助功能树
-  include_screenshot: true
-  som: true                  # 是否在截图上画编号标记（Set-of-Mark）
-  som_max_marks: 60          # 最多标记多少个元素（总数上限）
-  som_dock_max_marks: 20     # 程序坞最多标记几个图标（图标多时不会只标一半）
-  som_max_apps: 1            # 最多枚举几个可见应用（som_frontmost_only 开启时固定为 1）
   verify_after_action: true  # 动作后是否校验屏幕是否变化
   verify_delay_s: 0.5        # 动作后等待多久再截图对比（太快会把慢渲染误判为无变化）
   screenshot_diff_threshold: 0.002   # 变化像素占比低于此值视为「没反应」
@@ -48,40 +44,44 @@ loop:
   max_replans: 1
   # ── OCR 坐标兜底：AX 里没有的元素，用屏幕文字反查位置（约 0.3s/次，仅兜底时触发）──
   ocr_anchor: true
+  # ── OCR 补标注（蓝色框）：AX 读不到的界面靠它兜底 ──
+  # Electron / 网页 / 自绘界面 / 没给辅助功能权限的应用，AX 树是空的或多半空的，
+  # 红框根本画不出来；这里用 macOS Vision 读屏幕上的文字补一组蓝色编号框。
+  # 已经有红框盖住的文字不会重复编号，所以开着也不会让编号表翻倍。
+  som_ocr: true
+  som_ocr_max: 30            # 单帧最多补多少个 OCR 文字框
+  som_ocr_min_conf: 0.30     # Vision 置信度下限（0.3 实测能保住灰字/小字；再低会把图标纹理认成文字）
+  som_ocr_skip_ax_elements: 40  # AX 已枚举到这么多元素就跳过 OCR（原生应用不必花这 0.3s；0=总是跑）
+  som_dock_max_marks: 20     # 程序坞最多标记几个图标（图标多时不会只标一半）
+  som_max_apps: 1            # 最多枚举几个可见应用（som_frontmost_only 开启时固定为 1）
+  # ── 运行记录（runs/）：每步截图 + trace.jsonl，事后排障用 ──
+  save_trace: true
+  runs_keep: 50              # 只保留最近 N 次运行记录，更早的自动清理（0 = 不清理）
   require_approval_for_risky: true   # 删除/发送/支付这类动作是否要人工确认
   # 模型单价（每 1K token，美元）；留空则只统计 token 不折算金额
   model_pricing: {}
 
 perception:
-  screenshot_format: png
   max_image_side: 1568       # 送模型前缩放，控制 token 成本
   use_som: true              # 是否用 SOM 标记法（编号框）提升点击精度
-  som_max_elements: 100
-  a11y_max_depth: 12
-  a11y_max_elements: 400
+  a11y_max_depth: 24         # 辅助功能树最大递归深度
+  a11y_max_elements: 400     # 单个应用最多枚举多少个元素（防巨型页面拖慢一帧）
 
 grounding:
-  max_elements_in_prompt: 80
-  text_match_threshold: 0.62  # difflib 相似度阈值
-  prefer_a11y_over_pixels: true
-  coords_mode: pixel  # pixel | normalized_1000 | normalized_1
+  text_match_threshold: 0.62    # difflib 相似度阈值（目标描述 → 元素名）
+  prefer_a11y_over_pixels: true  # 文本匹配命中时优先用 a11y 元素坐标，而不是模型给的像素
+  coords_mode: pixel            # pixel | normalized_1000
 
 safety:
   require_approval_for_risky: true
   deny_shell_by_default: true       # 默认禁止 run_shell 类动作
   forbidden_action_types: [run_shell]
-  redact_secrets_in_traces: true
-
-models:
-  # 角色 -> 模型 profile 名（profile 定义在 config/models/*.yaml）
-  planner: planner_default
-  grounder: grounder_default
-  reflector: planner_default
+  redact_secrets_in_traces: true    # 写 trace.jsonl 前把 key/token 打码
 
 memory:
   enabled: true
-  store: sqlite              # sqlite | jsonl | memory(测试用)
-  sqlite_path: data/memory/yu_agent.sqlite
+  store: sqlite              # sqlite | memory(测试用)；当前实现固定 sqlite
+  sqlite_path: data/memory/yu_agent.sqlite   # 相对项目根；也可写绝对路径
   # L1 工作记忆：上下文预算控制
   working:
     max_recent_steps: 6      # 保留完整细节的最近步数
@@ -102,16 +102,11 @@ memory:
   procedural:
     min_success_streak: 2    # 同一技能连续成功几次才沉淀为模板
     require_verification: true
-  # 离线蒸馏（任务结束后统一做，不在循环里逐步写）
-  # ⚠️ 下面这几个开关目前**没有任何代码读取**：实际行为是「任务结束就提炼一次，
-  #    dry-run 跳过，失败不影响主流程」。留着是为了以后接 A/B 对照。
+  # 离线蒸馏：任务结束后统一提炼一次（dry-run 跳过，失败不影响主流程）
   distillation:
-    auto_after_task: true    # （未接线）当前实际：任务结束必提炼
-    keep_failed_as_negative: true   # （未接线）当前实际：失败任务也写情节记忆，但不写技法模板
-  # 供 eval 做记忆 on/off 对照
-  ab_test_flag: use_memory   # （未接线）eval 还没有 memory on/off 开关
+    auto_after_task: true    # 任务结束后是否调用模型提炼长期记忆
+    keep_failed_as_negative: true   # 失败任务也写情节记忆，但不写技法模板
 
 paths:
   runs_dir: runs
   cache_dir: .cache/vlm
-  prompts_dir: ""            # 留空 = 用包内 src/yu_agent/prompts

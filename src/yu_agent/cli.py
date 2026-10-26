@@ -49,6 +49,24 @@ def main(argv=None) -> int:
         "--no-content", action="store_true",
         help="关闭「用截图像素校准元素框」（框会更贴合 AX 原始矩形，用于对比效果）",
     )
+    p_per.add_argument(
+        "--no-ocr", action="store_true",
+        help="关闭 OCR 补标注（蓝色框）；默认开着，用于 AX 读不到的界面",
+    )
+
+    # web：网页三模态感知（DOM 快照 + AXTree + 截图 OCR），需要已开调试端口的 Chrome
+    p_web = sub.add_parser(
+        "web",
+        help="网页三模态感知（DOM+AXTree+OCR 融合，需要 playwright 与调试端口）",
+    )
+    p_web.add_argument("--cdp", default="http://127.0.0.1:9222", help="Chrome 远程调试地址")
+    p_web.add_argument("--shot", default="", help="同时把截图存到指定路径")
+    p_web.add_argument("--no-ocr", action="store_true", help="不做 OCR 校验（只看 DOM+AX）")
+    p_web.add_argument(
+        "--origin", default="",
+        help="手动指定页面内容区左上角在屏幕上的坐标，如 0,88（默认按窗口几何估算）",
+    )
+    p_web.add_argument("--json", action="store_true", help="输出 JSON（给脚本/回归用）")
 
     # memory：查看 / 清空长期记忆
     p_mem = sub.add_parser("memory", help="查看或清空长期记忆（跨任务沉淀的经验）")
@@ -81,6 +99,8 @@ def main(argv=None) -> int:
         return _screenshot(args)
     if args.command == "perceive":
         return _perceive(args)
+    if args.command == "web":
+        return _web(args)
     if args.command == "memory":
         return _memory(args)
     if args.command == "logs":
@@ -179,7 +199,9 @@ def _perceive(args) -> int:
     print(f"标注范围：{'全部可见应用' if args.max_apps > 1 else '只标最前面的应用 + 程序坞'}\n")
 
     from .prompts.loader import prompt_language
+    from .settings import get_settings
 
+    loop_cfg = get_settings().loop or {}
     lang = prompt_language()  # 与 agent 看到的编号表保持一致
     marked, mapping, _ = build_som_mapping(
         img,
@@ -189,13 +211,19 @@ def _perceive(args) -> int:
         language=lang,
         content_check=not args.no_content,
         shrink=not args.no_content,
+        use_ocr=not args.no_ocr,
+        ocr_max=int(loop_cfg.get("som_ocr_max", 30)),
+        ocr_min_conf=float(loop_cfg.get("som_ocr_min_conf", 0.30)),
     )
     stats = dict(a11y_mod.last_stats)
 
     apps = stats.get("apps") or []
     print(f"可见应用：{stats.get('app_count')} 个")
     for a in apps:
-        print(f"  · {a.get('name')}（pid={a.get('pid')}）：{a.get('elements')} 个可点元素")
+        raw = a.get("raw") or 0
+        kept = a.get("elements") or 0
+        chain = f"原始候选 {raw} 个 → 保留 {kept} 个" if raw else f"{kept} 个可点元素"
+        print(f"  · {a.get('name')}（pid={a.get('pid')}）：{chain}（本应用上限 {a.get('cap')}）")
     print(f"  程序坞元素：{stats.get('dock_elements')} 个")
     if stats.get("dock_hidden"):
         print("  ⚠️ 程序坞是「自动隐藏」状态（图标在屏幕外），已排除；"
@@ -209,6 +237,19 @@ def _perceive(args) -> int:
             f"窗口外丢弃 {audit.get('dropped_outside_window', 0)} 个"
             f"{'（本次已关闭）' if args.no_content else ''}"
         )
+        # 「标注不全」时这两个数字最关键：是**上限砍掉的**，不是没识别到
+        if audit.get("dropped_unnamed") or audit.get("truncated_by_limit"):
+            print(
+                f"  数量上限：无名字图标丢弃 {audit.get('dropped_unnamed', 0)} 个 / "
+                f"超出元素预算截断 {audit.get('truncated_by_limit', 0)} 个"
+            )
+            print("    想把这些也标出来：调大 --max（agent.total 在 loop.som_max_marks）")
+        if audit.get("merged") or audit.get("dropped_noise") or audit.get("dropped_offscreen"):
+            print(
+                f"  去重降噪：套娃元素合并 {audit.get('merged', 0)} 个 / "
+                f"噪声丢弃 {audit.get('dropped_noise', 0)} 个（菜单栏、<12px、无名字且禁用）/ "
+                f"屏幕外 {audit.get('dropped_offscreen', 0)} 个"
+            )
     if "frame_reliable" in stats:
         ok = stats.get("frame_reliable")
         ratio = stats.get("frame_content_ratio")
@@ -220,6 +261,25 @@ def _perceive(args) -> int:
             print("    ⚠️ 截图与元素枚举对不上（切了桌面 / 刚唤醒 / 截屏被卡住）。"
                   "\n       agent 会自动改用「看画面给坐标」，这张标记图仅作参考。")
     print(f"  合计标记：{len(mapping)} 个（提示词语言：{lang}）\n")
+
+    ocr_n = sum(1 for el in mapping.values() if el.kind == "ocr")
+    if args.no_ocr:
+        print("OCR 补标注：已关闭（--no-ocr）\n")
+    else:
+        from .perception import ocr as ocr_mod
+
+        backend = ocr_mod.backend_name()
+        if not backend:
+            print("OCR 补标注：不可用（没有 Vision / pytesseract）\n")
+        else:
+            print(f"OCR 补标注：{ocr_n} 个蓝色框（后端 {backend}）")
+            if ocr_n == 0:
+                print("  说明：AX 已经把屏幕上的文字都框住了，或者这帧确实没有文字。")
+            elif not apps:
+                print("  ⚠️ AX 一个应用元素都没读到，全靠 OCR 在撑："
+                      "\n     要么这个应用是 Electron/网页（正常），"
+                      "\n     要么它没拿到辅助功能权限（系统设置 → 隐私与安全性 → 辅助功能）。")
+            print("")
 
     if not apps:
         print("⚠️ 没有识别到任何应用内元素！")
@@ -233,9 +293,15 @@ def _perceive(args) -> int:
     out = args.output
     if not out:
         try:
-            from .common.paths import new_run_dir
+            from datetime import datetime
 
-            out = str(new_run_dir() / "perceive.png")
+            from .common.paths import runs_dir
+
+            # 单独放 runs/perceive/：perceive 只是自检，不该在运行记录列表里
+            # 占一个「好像跑过任务」的目录
+            d = runs_dir() / "perceive"
+            d.mkdir(parents=True, exist_ok=True)
+            out = str(d / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}.png")
         except Exception:
             out = "perceive.png"
 
@@ -253,6 +319,80 @@ def _perceive(args) -> int:
     return 0
 
 
+def _web(args) -> int:
+    """网页三模态感知：DOM 布局 + AXTree + 截图 OCR 融合，打印可点目标与冲突。
+
+    这是"感知准不准"的现场诊断工具：不用跑模型、不用点鼠标，
+    直接看三路信号对齐后剩下什么、哪些元素被判为遮挡/空白/名字不一致。
+    """
+    import json as _json
+
+    from .common.logging import get_logger, setup_logging
+    from .env.browser_cdp import get_session, playwright_available
+    from .perception.web.collect import dump_table
+
+    setup_logging()
+    log = get_logger("yu_agent.cli")
+
+    if not playwright_available():
+        print("需要 playwright 才能连浏览器：")
+        print("  pip install -e '.[browser]' && playwright install chromium   # 只需一次")
+        return 2
+
+    try:
+        sess = get_session(args.cdp)
+        geo = sess.geometry(refresh=True)
+    except Exception as e:
+        print(f"连接 {args.cdp} 失败：{e}")
+        print("提示：Chrome 需要用 --remote-debugging-port=9222 启动后保持窗口打开")
+        return 1
+
+    origin = geo.origin
+    if args.origin:
+        try:
+            ox, oy = [float(v) for v in args.origin.split(",")[:2]]
+            origin = (ox, oy)
+        except ValueError:
+            print(f"--origin 格式应为 x,y，收到：{args.origin}")
+            return 2
+
+    try:
+        perc = sess.perceive(ocr=not args.no_ocr, origin=origin)
+        shot = sess.screenshot()
+    except Exception as e:
+        print(f"感知失败：{e}")
+        log.warning("web 感知失败：%s", e)
+        return 1
+
+    print(f"CDP：{args.cdp}")
+    print(f"窗口：{geo.window}　内容区原点：{origin}　zoom={geo.zoom}　视口={geo.inner}")
+    if args.shot:
+        try:
+            shot.save(args.shot)
+            print(f"截图：{args.shot}")
+        except Exception as e:
+            print(f"截图保存失败：{e}")
+    print("")
+    for line in dump_table(perc):
+        print(line)
+
+    if args.json:
+        payload = {
+            "viewport": perc.viewport,
+            "origin": origin,
+            "zoom": geo.zoom,
+            "meta": perc.meta,
+            "targets": [
+                {"id": e.id, "role": e.role, "name": e.title,
+                 "x": e.x, "y": e.y, "w": e.w, "h": e.h, "enabled": e.enabled}
+                for e in perc.elements
+            ],
+            "conflicts": perc.result.conflicts,
+        }
+        print(_json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _format_marks(mapping) -> list:
     """把编号映射整理成按应用分组的文本（与给模型的编号表同构）。"""
     if not mapping:
@@ -262,7 +402,12 @@ def _format_marks(mapping) -> list:
     index: dict = {}
     for num in sorted(mapping.keys()):
         el = mapping[num]
-        key = "程序坞" if el.kind == "dock" else (el.app or "应用")
+        if el.kind == "dock":
+            key = "程序坞"
+        elif el.kind == "ocr":
+            key = "屏幕文字(OCR)"
+        else:
+            key = el.app or "应用"
         if key not in index:
             index[key] = len(groups)
             groups.append((key, []))
@@ -393,6 +538,15 @@ def _doctor() -> int:
         if not installed:
             ok = False
         print(f"  {mark} {name}")
+
+    # OCR 是「标注不全」的兜底通道（AX 读不到的界面全靠它），装没装要能一眼看到
+    from .perception import ocr as ocr_mod
+
+    backend = ocr_mod.backend_name()
+    print(f"  {'✓' if backend else '✗（不可用）'} OCR 后端：{backend or '无'}")
+    if backend == "vision":
+        print("    macOS Vision 可用：AX 读不到的界面会用蓝色编号框补上")
+
     print("\n提示：pip install -e '.[macos]' 安装完整依赖（macOS）。")
     return 0 if ok else 1
 
