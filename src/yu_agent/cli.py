@@ -45,6 +45,10 @@ def main(argv=None) -> int:
         "--max-apps", type=int, default=1,
         help="最多枚举几个可见应用（默认 1 = 只标最前面的应用）",
     )
+    p_per.add_argument(
+        "--no-content", action="store_true",
+        help="关闭「用截图像素校准元素框」（框会更贴合 AX 原始矩形，用于对比效果）",
+    )
 
     # logs：查看日志文件位置 / 末尾内容
     p_log = sub.add_parser("logs", help="显示日志文件路径（或末尾若干行）")
@@ -152,6 +156,8 @@ def _perceive(args) -> int:
         dock_max=args.dock_max,
         max_apps=args.max_apps,
         language=lang,
+        content_check=not args.no_content,
+        shrink=not args.no_content,
     )
     stats = dict(a11y_mod.last_stats)
 
@@ -164,6 +170,24 @@ def _perceive(args) -> int:
         print("  ⚠️ 程序坞是「自动隐藏」状态（图标在屏幕外），已排除；"
               "agent 会用 cmd+space 打开应用")
     print(f"  坐标系校准：{stats.get('calibration')}")
+    audit = stats.get("audit") or {}
+    if audit:
+        print(
+            f"  标注校准：丢弃空框 {audit.get('dropped_empty', 0)} 个 / "
+            f"收缩到内容 {audit.get('shrunk', 0)} 个 / "
+            f"窗口外丢弃 {audit.get('dropped_outside_window', 0)} 个"
+            f"{'（本次已关闭）' if args.no_content else ''}"
+        )
+    if "frame_reliable" in stats:
+        ok = stats.get("frame_reliable")
+        ratio = stats.get("frame_content_ratio")
+        print(
+            f"  帧可信度：{'✓ 正常' if ok else '✗ 异常'}"
+            f"（{ratio} 的框落在有画面的位置）"
+        )
+        if not ok:
+            print("    ⚠️ 截图与元素枚举对不上（切了桌面 / 刚唤醒 / 截屏被卡住）。"
+                  "\n       agent 会自动改用「看画面给坐标」，这张标记图仅作参考。")
     print(f"  合计标记：{len(mapping)} 个（提示词语言：{lang}）\n")
 
     if not apps:

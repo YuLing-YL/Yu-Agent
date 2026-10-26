@@ -141,6 +141,17 @@ class MainWindow(QMainWindow):
         self.frontmost_only_cb.toggled.connect(self._on_frontmost_only_toggled)
         row2.addWidget(self.frontmost_only_cb)
 
+        self.content_check_cb = QCheckBox("框校准")
+        self.content_check_cb.setChecked(bool(get_settings().agent.som_content_check))
+        self.content_check_cb.setToolTip(
+            "用截图像素校准元素框：\n"
+            "· 框比内容大 → 收缩到真实内容（列表行不再压住邻居）\n"
+            "· 框里什么都没有 → 直接丢弃（不再出现罩在空白上的大红框）\n"
+            "取消勾选可对比「AX 给什么框就画什么框」的原样。"
+        )
+        self.content_check_cb.toggled.connect(self._on_content_check_toggled)
+        row2.addWidget(self.content_check_cb)
+
         self.step_cb = QCheckBox("单步执行")
         self.step_cb.setToolTip("每执行完一步就暂停，点「下一步」再继续。排查第几步出错时用。")
         row2.addWidget(self.step_cb)
@@ -285,6 +296,17 @@ class MainWindow(QMainWindow):
         try:
             set_agent_option("som_frontmost_only", bool(checked))
             self.status.setText("只标当前窗口" if checked else "标注所有可见应用")
+        except Exception as e:
+            self.status.setText(f"保存失败：{e}")
+
+    def _on_content_check_toggled(self, checked: bool) -> None:
+        from ..settings import set_agent_option
+
+        try:
+            set_agent_option("som_content_check", bool(checked))
+            self.status.setText(
+                "元素框已按截图内容校准" if checked else "元素框按 AX 原始矩形绘制"
+            )
         except Exception as e:
             self.status.setText(f"保存失败：{e}")
 

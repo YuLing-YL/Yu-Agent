@@ -68,6 +68,53 @@ def _quantize(v: Optional[int]) -> Optional[int]:
     return int(round(float(v) / _COORD_GRID))
 
 
+def _dist_to_rect(x: float, y: float, el: Any) -> float:
+    """点到元素矩形的距离（点在矩形内部算 0）。"""
+    dx = max(el.x - x, 0.0, x - (el.x + el.w))
+    dy = max(el.y - y, 0.0, y - (el.y + el.h))
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def _anchor_by_text(
+    action: Action,
+    marks_map: Dict[int, Any],
+    x: int,
+    y: int,
+    max_dist: float = 220.0,
+) -> Optional[Tuple[int, int, int, Any]]:
+    """模型没用编号、只给了坐标时，用它的 reason 文字反查元素表。
+
+    这是「给原图让模型自己算坐标」那条路的兜底：模型对像素的估计误差能到
+    上百像素（尤其是缩略图上的小目标），但它对「目标叫什么」通常说得很准。
+    只要 reason 里唯一命中某个元素、且它给的点也落在该元素附近，
+    就用元素的精确坐标替代模型的估计——比硬点模型给的像素稳得多。
+
+    返回 (x, y, 编号, 元素) 或 None。有歧义时返回 None（宁可不改）。
+    """
+    reason = str(getattr(action, "reason", "") or "")
+    if not reason or not marks_map:
+        return None
+    cands: List[Tuple[int, float, int, Any]] = []
+    for num, el in marks_map.items():
+        for text in (
+            getattr(el, "title", "") or "",
+            getattr(el, "description", "") or "",
+        ):
+            if text and _name_matches(str(text), reason):
+                d = _dist_to_rect(x, y, el)
+                if d <= max_dist:
+                    cands.append((len(str(text).strip()), d, num, el))
+                break
+    if not cands:
+        return None
+    # 名字最长（最具体）的优先；长度相同再看谁离模型给的点更近
+    cands.sort(key=lambda c: (-c[0], c[1]))
+    if len(cands) > 1 and cands[0][0] == cands[1][0]:
+        return None
+    _, _, num, el = cands[0]
+    return int(round(el.cx)), int(round(el.cy)), num, el
+
+
 def _action_target_sig(action: Action) -> Tuple[Any, ...]:
     """把动作归一化成「目标标识」，用于判定是否在重复操作同一个地方。"""
     t = action.type
@@ -243,6 +290,9 @@ class AgentLoop:
         self.som_frontmost_only = bool(self.cfg.get("som_frontmost_only", True))
         if self.som_frontmost_only:
             self.som_max_apps = 1
+        # 用截图像素校准元素框（空框丢弃 + 过大的框收缩到真实内容）。
+        # 关掉它就能退回「AX 给什么框就画什么框」，用于对比排查。
+        self.som_content_check = bool(self.cfg.get("som_content_check", True))
         # 编号跨帧稳定器：同一个元素在不同帧拿到同一个编号，模型跨帧指代才可靠
         self._mark_stab = MarkStabilizer()
         # 任务涉及菜单时才标菜单栏项（否则它们占掉一大排编号还几乎用不到）
@@ -336,6 +386,8 @@ class AgentLoop:
                                 stabilizer=self._mark_stab,
                                 skip_menubar=self._skip_menubar,
                                 draw=draw_boxes,
+                                content_check=self.som_content_check,
+                                shrink=self.som_content_check,
                             )
                             if draw_boxes:
                                 obs_img = marked_img
@@ -345,13 +397,18 @@ class AgentLoop:
                             apps_desc = "、".join(
                                 f"{a.get('name')}({a.get('elements')})" for a in apps
                             )
+                            audit = a11y_stats.get("audit") or {}
                             log.info(
-                                "观察：标记 %d 个元素（应用 %s 个：%s；程序坞 %s 个；校准 %s）",
+                                "观察：标记 %d 个元素（应用 %s 个：%s；程序坞 %s 个；校准 %s；"
+                                "丢弃空框 %s / 收缩 %s / 窗口外 %s）",
                                 len(marks_map),
                                 a11y_stats.get("app_count"),
                                 apps_desc or "无",
                                 a11y_stats.get("dock_elements"),
                                 a11y_stats.get("calibration"),
+                                audit.get("dropped_empty", 0),
+                                audit.get("shrunk", 0),
+                                audit.get("dropped_outside_window", 0),
                             )
                             self._emit(
                                 {
@@ -566,12 +623,17 @@ class AgentLoop:
                             if action.type in _CLICK_TYPES
                             else None
                         )
+                        how = "坐标吸附"
+                        if snap is None and action.type in _CLICK_TYPES:
+                            # 几何上没吸附到 → 退回语义锚定：按 reason 里说的名字反查
+                            snap = _anchor_by_text(action, marks_map, action.x, action.y)
+                            how = "语义锚定"
                         if snap is not None:
                             sx_, sy_, num, el = snap
                             clicked_el = el
                             log.info(
-                                "坐标吸附：模型给的 (%d,%d) → #%d %s 中心 (%d,%d)",
-                                action.x, action.y, num, el.label(), sx_, sy_,
+                                "%s：模型给的 (%d,%d) → #%d %s 中心 (%d,%d)",
+                                how, action.x, action.y, num, el.label(), sx_, sy_,
                             )
                             action.x, action.y = sx_, sy_
                         elif marks_map:
@@ -949,17 +1011,20 @@ class AgentLoop:
         VLM 自己估坐标经常差几十像素（表现为「点在目标左边一点」）。
         若它给的点落在某个标记元素附近，就认为它想点的是那个元素。
         返回 (x, y, 编号, 元素) 或 None。
+
+        距离用「点到元素矩形」而不是「点到元素中心」：
+        一个大按钮（比如整行输入框）模型点在左边缘，算中心距离可能超过阈值，
+        明明点对了却被判成「没匹配上」，白白丢掉一次吸附机会。
         """
         if not marks_map:
             return None
         best = None
         best_d = None
         for num, el in marks_map.items():
-            ex, ey = el.cx, el.cy
-            d = ((ex - x) ** 2 + (ey - y) ** 2) ** 0.5
+            d = _dist_to_rect(x, y, el)
             if d <= radius and (best_d is None or d < best_d):
                 best_d = d
-                best = (int(round(ex)), int(round(ey)), num, el)
+                best = (int(round(el.cx)), int(round(el.cy)), num, el)
         return best
 
     def _build_subtask_hint(self) -> str:
@@ -1063,6 +1128,25 @@ class AgentLoop:
             # 多应用枚举：所有应用内元素的总数
             app_count = sum(int(a.get("elements") or 0) for a in a11y_stats["apps"])
         dock_count = a11y_stats.get("dock_elements") or 0
+
+        # 帧可信度最低：截屏与元素枚举不是同一时刻/同一桌面时，
+        # 所有红框会整体错位（切 Space、刚从睡眠唤醒、截屏被系统卡住几十秒）。
+        # 这种情况下「照编号点」必错，必须先告诉模型改用画面本身。
+        if a11y_stats.get("frame_reliable") is False:
+            return self._t(
+                "【系统提示】这一帧的编号框和屏幕画面**对不上**"
+                f"（只有 {a11y_stats.get('frame_content_ratio')} 的框落在有画面的位置），"
+                "框的位置不可信，不要照编号点。\n"
+                "请直接看画面里**实际显示**的元素，用像素坐标 x/y 输出点击位置。\n"
+                "如果画面里根本没有目标窗口，先用 "
+                '{"type": "skill", "skill": "open_app", "args": {"app_name": "应用名"}} 切过去。',
+                "[System note] The numbered boxes in this frame do NOT line up with the picture "
+                f"(only {a11y_stats.get('frame_content_ratio')} of them land on visible content), "
+                "so their positions cannot be trusted — do not click by number.\n"
+                "Look at the elements that are ACTUALLY visible and output pixel x/y for the click.\n"
+                "If the target window is not visible at all, switch to it first with "
+                '{"type": "skill", "skill": "open_app", "args": {"app_name": "<app>"}}.',
+            )
 
         if a11y_stats.get("dock_hidden"):
             # 程序坞开了「自动隐藏」：图标在屏幕外，点了也没用。

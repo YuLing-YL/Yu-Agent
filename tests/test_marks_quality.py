@@ -85,11 +85,12 @@ def test_draw_marks_uses_stabilizer_and_avoids_overlap() -> None:
     img = Image.new("RGB", (1200, 800), (255, 255, 255))
     els = [el(f"项{i}", 100, 100 + i * 18, w=120, h=16) for i in range(6)]
     stab = MarkStabilizer()
-    marked, mp = draw_marks(img, els, stabilizer=stab)
+    # 纯白画布上没有内容可校准 → 关掉内容检测，专测「稳定编号 + 标签避让」
+    marked, mp = draw_marks(img, els, stabilizer=stab, content_check=False)
     assert len(mp) == 6, mp
     # 第二帧顺序反过来，编号必须跟着元素走
     els2 = list(reversed(els))
-    _, mp2 = draw_marks(img, els2, stabilizer=stab)
+    _, mp2 = draw_marks(img, els2, stabilizer=stab, content_check=False)
     for num, e in mp.items():
         assert mp2[num].title == e.title, f"#{num} 指向的元素变了：{e.title} → {mp2[num].title}"
     print("✓ draw_marks 使用稳定编号，标签互不重叠")

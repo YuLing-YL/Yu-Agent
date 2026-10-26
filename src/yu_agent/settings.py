@@ -55,6 +55,7 @@ class AgentConfig(BaseModel):
     som_mode: str = "marks"
     som_max_marks: int = 60  # 单帧最多标多少个（太多会互相重叠、模型看不过来）
     som_frontmost_only: bool = True  # 只标最前面的应用 + 程序坞
+    som_content_check: bool = True  # 用截图像素校准元素框（空框丢弃 / 过大框收缩到内容）
     stop_on_grounding_error: bool = True
     dry_run: bool = False
 

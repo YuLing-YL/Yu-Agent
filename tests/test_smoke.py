@@ -249,7 +249,8 @@ def test_multiapp_enumeration_and_occlusion() -> None:
         mod._app_name = lambda pid: {1: "Safari", 2: "终端", 3: "备忘录"}.get(pid, "")
 
         def fake_app_elements(pid, name, occluders, limit, screen,
-                              is_frontmost=False, skip_menubar=True):
+                              is_frontmost=False, skip_menubar=True,
+                              win_rects=None, calib=(0.0, 0.0)):
             calls.append({"pid": pid, "name": name, "limit": limit,
                           "occluders": len(occluders), "front": is_frontmost})
             return [

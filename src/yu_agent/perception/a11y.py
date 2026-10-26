@@ -202,6 +202,32 @@ _EXCLUDED_PIDS: set = set()
 # 上一次枚举的诊断信息（供日志/排障使用）
 last_stats: Dict[str, Any] = {}
 
+# 本次枚举的审计计数（空框/窗口外/收缩等），由 som 层继续累加
+_audit: Dict[str, int] = {}
+
+
+def reset_audit() -> None:
+    """清空本次枚举的审计计数（每帧开头调用一次）。"""
+    _audit.clear()
+    for k in (
+        "dropped_outside_window",
+        "dropped_empty",
+        "shrunk",
+        "total_candidates",
+    ):
+        _audit[k] = 0
+
+
+def audit() -> Dict[str, int]:
+    """当前审计计数（拷贝，避免被外部改）。"""
+    return dict(_audit)
+
+
+def bump_audit(key: str, n: int = 1) -> None:
+    """累加一项审计计数（som 层用它记录空框/收缩数量）。"""
+    _audit[key] = int(_audit.get(key) or 0) + n
+
+
 # 程序坞状态：设为「自动隐藏」时，AX 报的坐标会落在屏幕下边缘之外，
 # 这些图标点了也点不到，只能丢掉并提示模型改用 cmd+space。
 _dock_state: Dict[str, Any] = {"hidden": False, "dropped": 0}
@@ -215,6 +241,10 @@ _MENUBAR_MAX_ITEM_W = 260
 _MAX_APPS = 6
 # 单个元素的遍历深度
 _MAX_DEPTH = 18
+# 元素中心离「自己应用的所有窗口」都超过这个距离，才认定是幽灵元素（坐标已失效）。
+# 取大一点是故意的：窗口阴影/圆角/多显示器负坐标都会造成几十像素的误差，
+# 宁可多标一个错位的框，也不要一次丢掉半个应用的可点元素。
+_GHOST_DISTANCE = 160.0
 
 
 def set_excluded_pids(pids) -> None:
@@ -826,6 +856,34 @@ def _cap_unnamed_icons(
     return out
 
 
+def _dist_to_rect(x: float, y: float, rect: Tuple[float, float, float, float]) -> float:
+    """点到矩形的距离（点在内部为 0）。"""
+    rx, ry, rw, rh = rect
+    dx = max(rx - x, 0.0, x - (rx + rw))
+    dy = max(ry - y, 0.0, y - (ry + rh))
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def _clip_rect_to(
+    el: UIElement, host: Tuple[float, float, float, float], min_keep: float = 0.45
+) -> Optional[Tuple[float, float, float, float]]:
+    """把元素矩形裁到窗口范围内。
+
+    返回 None 表示「裁完几乎什么都不剩」→ 这个元素多半不在窗口里。
+    """
+    hx, hy, hw, hh = host
+    x0 = max(el.x, hx)
+    y0 = max(el.y, hy)
+    x1 = min(el.x + el.w, hx + hw)
+    y1 = min(el.y + el.h, hy + hh)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    old_area = max(1.0, el.w * el.h)
+    if ((x1 - x0) * (y1 - y0)) / old_area < min_keep:
+        return None
+    return x0, y0, x1 - x0, y1 - y0
+
+
 def _app_elements(
     pid: int,
     app_name: str,
@@ -834,28 +892,67 @@ def _app_elements(
     screen: Tuple[float, float],
     is_frontmost: bool = False,
     skip_menubar: bool = True,
+    win_rects: Optional[List[Tuple[float, float, float, float]]] = None,
+    calib: Tuple[float, float] = (0.0, 0.0),
 ) -> List[UIElement]:
     """枚举单个应用的元素，并丢掉被前面窗口盖住的（点了也点不到）。
 
     is_frontmost=False 时会丢掉该应用的「菜单栏项」：macOS 的菜单栏只有前台
     应用的才真实显示，其它应用虽然也有同位置同尺寸的菜单栏元素，但那只是重影，
     标出来会让模型点到前台应用的菜单上。
+
+    win_rects: 该应用**所有**窗口的边界（Quartz 坐标系 = 点击坐标系）。
+    给了就做一次「元素必须落在某个窗口内」的校验，把窗口外/错位的幽灵元素丢掉
+    —— 它们画在截图上就是一串罩在空白处的大红框。
     """
     import ApplicationServices as AX
 
     app = AX.AXUIElementCreateApplication(pid)
     raw: List[UIElement] = []
     _walk(app, raw, 0, max(limit * 6, 400), screen, app_name)
+
+    # AX 坐标 -> 点击坐标（大多数机器偏移为 0，只在确实有偏移时才平移）
+    dx, dy = calib
+    if dx or dy:
+        for el in raw:
+            el.x += dx
+            el.y += dy
+
     raw = _dedupe(raw)
     raw = _dedupe_by_rect(raw)  # 「行→单元格→文字」套娃合并成一个
 
     kept: List[UIElement] = []
+    ghosts: List[UIElement] = []
     for el in raw:
         if not is_frontmost and el.role == "AXMenuBarItem":
             continue
         if occluders and any(_point_in(el.cx, el.cy, r) for r in occluders):
             continue        # 被更靠前的窗口遮住 → 不要标记，免得模型点了个点不到的位置
+
+        # 元素要落在自己应用某个窗口的可视范围内。
+        # ⚠️ 这条规则必须保守：有些进程的 AX 树和 Quartz 窗口信息根本对不上
+        # （窗口 owner 记在父进程名下、跨进程托管窗口、多显示器负坐标……），
+        # 一刀切「不在窗口内就丢」实测会一次干掉 37 个正常元素。
+        # 所以只丢「离所有窗口都很远」的幽灵元素，其它的只做裁剪。
+        if win_rects and el.role != "AXMenuBarItem":
+            host = next((r for r in win_rects if _point_in(el.cx, el.cy, r)), None)
+            near = min(_dist_to_rect(el.cx, el.cy, r) for r in win_rects)
+            if host is None and near > _GHOST_DISTANCE:
+                ghosts.append(el)
+                continue
+            if host is not None:
+                clipped = _clip_rect_to(el, host)
+                if clipped is not None:
+                    el.x, el.y, el.w, el.h = clipped
         kept.append(el)
+
+    # 兜底：如果大半元素都被判成幽灵，说明这个应用的「AX 坐标 vs 窗口边界」
+    # 本来就对不上（多显示器 / 托管窗口），规则不可信 → 全部保留，只在审计里记一笔。
+    if ghosts and len(ghosts) > max(2, int(len(raw) * 0.5)):
+        bump_audit("window_rule_unreliable")
+        kept.extend(ghosts)
+    elif ghosts:
+        bump_audit("dropped_outside_window", len(ghosts))
 
     # 降噪：菜单栏项 / 点不中的细小元素 / 无标签且禁用 / 全屏容器
     kept = _drop_noise(kept, skip_menubar=skip_menubar)
@@ -889,6 +986,7 @@ def get_all_interactive_elements(
     """
     windows = _on_screen_windows()
     screen = _screen_size()
+    reset_audit()
 
     # 自身窗口只作为遮挡物参与计算（GUI 运行时会把主窗口让开）
     own_rects = [_rect_of(w) for w in windows if w["pid"] in _EXCLUDED_PIDS]
@@ -899,7 +997,19 @@ def get_all_interactive_elements(
         if pid:
             order = [pid]
 
+    # 坐标校准只做一次（要遍历窗口 + AXWindows，别在循环里重复做）。
+    # 必须在枚举**之前**算出：窗口裁剪用的是点击坐标系，元素坐标要先平移过来。
+    calib = (0.0, 0.0)
+    if auto_calibrate and windows:
+        dx, dy = _calibrate()
+        if dx or dy:
+            calib = (dx, dy)
+
     dock = get_dock_elements(max(4, dock_max))
+    if calib != (0.0, 0.0):
+        for el in dock:
+            el.x += calib[0]
+            el.y += calib[1]
     dock_hidden = bool(_dock_state.get("hidden"))
     dock_dropped = int(_dock_state.get("dropped") or 0)
     app_budget = max(1, max_elements - len(dock))
@@ -922,28 +1032,21 @@ def get_all_interactive_elements(
     for i, pid in enumerate(order):
         name = _app_name(pid) or f"pid{pid}"
         cap = min(caps[i], max(1, app_budget - len(elements)))
+        # 这个 pid 的所有窗口边界（用于「元素必须落在自己窗口内」的校验）
+        win_rects = [_rect_of(w) for w in windows if w["pid"] == pid]
         kept = _app_elements(
             pid, name, occluders, cap, screen,
             is_frontmost=(i == 0), skip_menubar=skip_menubar,
+            win_rects=win_rects, calib=calib,
         )
         per_app.append({"pid": pid, "name": name, "elements": len(kept)})
         elements.extend(kept)
         # 这个应用的所有窗口都会挡住它后面的应用
-        occluders.extend(_rect_of(w) for w in windows if w["pid"] == pid)
+        occluders.extend(win_rects)
         if len(elements) >= app_budget:
             break
 
     elements.extend(dock)
-
-    # 坐标校准：把 AX 坐标平移到与鼠标点击一致的坐标系
-    calib = (0.0, 0.0)
-    if auto_calibrate and elements:
-        dx, dy = _calibrate()
-        if dx or dy:
-            calib = (dx, dy)
-            for el in elements:
-                el.x += dx
-                el.y += dy
 
     for i, el in enumerate(elements):
         el.id = i
@@ -961,6 +1064,7 @@ def get_all_interactive_elements(
             "dock_dropped": dock_dropped,
             "total": len(elements),
             "calibration": calib,
+            "audit": audit(),
         }
     )
     return elements

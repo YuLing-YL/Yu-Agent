@@ -104,7 +104,12 @@ class Planner:
                     "Output the pixel coordinates of the target in the screenshot: "
                     f"x horizontal (0~{screen_size[0] - 1}), y vertical (0~{screen_size[1] - 1}). "
                     f"For example the screen center is x={screen_size[0] // 2}, y={screen_size[1] // 2}. "
-                    "Never use 0~1 or 0~1000 normalized coordinates."
+                    "Never use 0~1 or 0~1000 normalized coordinates.\n"
+                    "How to locate precisely: (1) say what the target IS in `reason`, "
+                    "using the exact words you see on screen (e.g. \"the Search field at the "
+                    "top right of the window\"); (2) look at where that shape actually is in "
+                    "this image; (3) output the centre of the visible shape itself — not the "
+                    "edge of its container, not where it was in a previous step."
                 )
             else:
                 prompt_parts.append(
@@ -113,7 +118,10 @@ class Planner:
                     f"x 是横坐标（从左到右，范围 0~{screen_size[0] - 1}），"
                     f"y 是纵坐标（从上到下，范围 0~{screen_size[1] - 1}）。"
                     f"例如点击屏幕正中央，应输出 x={screen_size[0] // 2}, y={screen_size[1] // 2}。"
-                    f"不要使用 0~1 或 0~1000 的归一化坐标。"
+                    f"不要使用 0~1 或 0~1000 的归一化坐标。\n"
+                    f"定位方法：(1) 先在 reason 里说清目标是**什么东西**，用屏幕上真实显示的字"
+                    f"（例如「窗口右上角的搜索框」）；(2) 在图上找到那个东西实际所在的像素；"
+                    f"(3) 输出它**本体**的中心，不要给外层容器的边缘，也不要沿用上一步的坐标。"
                 )
         if memory_context:
             prompt_parts.append(memory_context)

@@ -11,6 +11,33 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .a11y import UIElement, get_all_interactive_elements, label_language, set_label_language
 
+# 这些角色的 AX 矩形经常比「眼睛看到的东西」大很多（盒子含 padding、甚至整行宽），
+# 用截图像素把它们收缩到真实内容上。按钮/输入框不在其中：它们的 AX 矩形本来就够准，
+# 收缩反而会把点击区弄小。
+_SHRINKABLE_ROLES = {
+    "AXRow", "AXCell", "AXListItem", "AXOutlineRow", "AXColumn", "AXGrid",
+    "AXStaticText", "AXImage", "AXGroup", "AXLink", "AXHeading",
+    "AXList", "AXTable", "AXOutline", "AXWebArea", "AXTextArea",
+}
+
+# 两个编号标签之间至少留的空白（像素）
+_LABEL_GAP = 2
+
+# 允许因为「框里什么都没有」而被丢弃的角色。
+# 只丢容器/装饰/文字：它们空着就是纯噪声（画出来是罩在空白上的大红框）。
+# 按钮、输入框即使检测不到内容也必须保留：白底白界面的输入框是合法控件。
+_DROPPABLE_EMPTY_ROLES = {
+    "AXRow", "AXCell", "AXListItem", "AXOutlineRow", "AXColumn",
+    "AXStaticText", "AXImage", "AXGroup",
+}
+
+# 按钮/图标类：只有「没有名字」且框里真的什么都没有时才丢。
+# 这类元素在截图上看就是一块空白（工具栏占位、被隐藏的 tab 按钮），
+# 模型既认不出是什么、点了也未必有反应，白占一个编号。
+# 有名字的按钮一律保留——名字本身就是给模型的线索。
+_UNNAMED_EMPTY_OK_ROLES = {"AXButton", "AXToolbarButton"}
+
+
 
 def _load_font(size: int):
     """加载一个可用的字体（优先系统字体）。"""
@@ -159,10 +186,13 @@ def _label_anchor(
     """给编号标签找一个不和别人重叠的位置。
 
     编号表挤成一团是「模型读错编号」的主因（尤其窄侧边栏、工具栏）。
+    实测微信输入栏那排小按钮，标签会互相压住，图上是「11(1 12」这种
+    根本读不出来的东西 —— 模型只能瞎猜。
 
-    ⚠️ 候选顺序刻意把「框内」排在前面：
+    ⚠️ 候选顺序刻意把「框外左侧」排第一：
     列表/网格每行只有 20 来个像素，把标签甩到框外（上一行/下一行）
-    必然压住邻居的框，比框内稍微盖住一点文字更糟。
+    必然压住邻居的框；而框外左侧正好压在项目图标上，不挡名字
+    （模型是靠名字认元素的）。
     """
     margin = 1
     cands = [
@@ -172,18 +202,56 @@ def _label_anchor(
         (x0 + margin, y0 + margin),                       # 框内左上
         (x1 + margin, y0),                                # 框右外
         (x1 - tw - margin, y0 + margin),                  # 框内右上
+        (x0 - tw - margin, y1 - th - margin),             # 框外左下
+        (x1 + margin, y1 - th - margin),                  # 框外右下
+        (x0 + margin, y1 - th - margin),                  # 框内左下
         (x0, y0 - th - margin),                           # 正上方
         (x0, y1 + margin),                                # 正下方
     ]
-    best = cands[0]
-    for cx, cy in cands:
+
+    def _score(cx: float, cy: float) -> float:
+        """越界罚分 + 与已放标签的重叠面积。
+
+        occupied 里存的是「禁入区」（比标签本身大 2px），所以两个标签起码隔开
+        2px——否则一排密集按钮上的编号会连着写，图上就是「11|12|13」这种
+        根本分不开的一串。
+        """
         if cx < 0 or cy < 0 or cx + tw > W or cy + th > H:
-            continue
+            return float("inf")
         box = (cx - 1, cy - 1, cx + tw + 1, cy + th + 1)
-        if not any(_overlaps(box, o) for o in occupied):
-            return cx, cy
-        best = (cx, cy)
+        return sum(_overlap_area(box, o) for o in occupied)
+
+    best = cands[0]
+    best_score = float("inf")
+    for cx, cy in cands:
+        s = _score(cx, cy)
+        if s <= 0:
+            return cx, cy                       # 完全不重叠，直接用
+        if s < best_score:
+            best, best_score = (cx, cy), s
+
+    # 所有常规位置都会压到别人的标签 → 沿框左边/_ 上下逐步外扩找空位
+    for step in range(2, 90, 2):
+        for cx, cy in (
+            (x0 - tw - margin - step, y0),
+            (x1 + margin + step, y0),
+            (x0, y0 - th - margin - step),
+            (x0, y1 + margin + step),
+        ):
+            if _score(cx, cy) <= 0:
+                return cx, cy
     return best
+
+
+def _overlap_area(
+    a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]
+) -> float:
+    """两个矩形的交叠面积（不重叠为 0）。"""
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    h = min(a[3], b[3]) - max(a[1], b[1])
+    if w <= 0 or h <= 0:
+        return 0.0
+    return w * h
 
 
 def _overlaps(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> bool:
@@ -195,6 +263,8 @@ def draw_marks(
     elements: List[UIElement],
     coord_scale: float = 1.0,
     stabilizer: Optional[MarkStabilizer] = None,
+    content_check: bool = True,
+    shrink: bool = True,
 ) -> Tuple[Image.Image, Dict[int, UIElement]]:
     """在图像上绘制编号框，返回 (标注后的图, 编号->元素映射)。
 
@@ -203,7 +273,14 @@ def draw_marks(
 
     coord_scale: 元素坐标(逻辑像素) -> 本图像素 的比例。
                  图像未被缩放时为 1.0；被缩放为 f 倍时应传 f。
+    content_check: 用截图像素反向校验元素矩形（见 perception/content.py）：
+       - 框里什么都没有 → 丢掉（这类框画出来就是罩在空白处的大红框）
+       - 框明显比内容大 → 收缩到内容上（列表行不再压住上下邻居）
+    shrink: 是否做收缩（content_check=False 时无效）。
     """
+    from . import a11y as _a11y
+    from .content import content_info, shrink_box
+
     W, H = img.size
     # 先过滤掉完全在截图外的元素
     visible = [
@@ -213,25 +290,13 @@ def draw_marks(
     ]
     numbers = stabilizer.assign(visible) if stabilizer else list(range(1, len(visible) + 1))
 
-    marked = img.copy()
-    draw = ImageDraw.Draw(marked)
-    # 字号跟着分辨率走；但每个元素再按自己的高度收一次（见下），
-    # 否则列表/网格每行只有 ~20px，标签会溢出到邻行把别人的框压住。
-    base_size = max(16, img.size[0] // 70)
-    font_cache = {}
-
-    def _font(size: int):
-        size = max(10, int(size))
-        if size not in font_cache:
-            font_cache[size] = _load_font(size)
-        return font_cache[size]
-
-    mapping: Dict[int, UIElement] = {}
-    occupied: List[Tuple[float, float, float, float]] = []
-
+    # ── 阶段 1：先算好每个元素的最终矩形 ────────────────────────────
+    # 必须在动笔之前全部算完：否则先画的框会污染后面元素的内容分析。
+    plan: List[Tuple[int, UIElement, Tuple[float, float, float, float], Any]] = []
+    analyzed = 0
+    with_content = 0
     for i, el in enumerate(visible):
         num = numbers[i] if i < len(numbers) else i + 1
-        # 裁剪到截图范围内
         x0 = max(0.0, el.x * coord_scale)
         y0 = max(0.0, el.y * coord_scale)
         x1 = min(float(W), (el.x + el.w) * coord_scale)
@@ -239,25 +304,92 @@ def draw_marks(
         if x1 <= x0 or y1 <= y0:
             continue
 
-        # 边框：细一点，别把元素本身盖住
-        color = (230, 30, 30)
-        draw.rectangle([x0, y0, x1, y1], outline=color, width=2)
+        info = content_info(img, (x0, y0, x1, y1)) if content_check else None
+        if info is not None:
+            analyzed += 1
+            if info.has_content:
+                with_content += 1
 
-        # 编号标签：字号不超过元素高度的 0.7 倍 → 标签一定能塞在自己这一行里
-        h_px = y1 - y0
-        font = _font(min(base_size, max(10, int(h_px * 0.7))))
+        plan.append((num, el, (x0, y0, x1, y1), info))
+
+    # 帧可信度：元素框「落在有画面的地方」的比例。
+    # 这一项低，基本只有一个原因——截屏和 AX 枚举不是同一时刻/同一桌面
+    # （切了 Space、刚唤醒、截屏被系统卡住 30s 拿到旧帧）。
+    # 这时画出来的框会整体错位，必须让上层知道，不能闷头让模型照着点。
+    ratio = (with_content / analyzed) if analyzed else 1.0
+    _a11y.last_stats["frame_content_ratio"] = round(ratio, 3)
+    _a11y.last_stats["frame_reliable"] = bool(ratio >= 0.5)
+
+    marked = img.copy()
+    draw = ImageDraw.Draw(marked)
+    # 标签字号固定：跟着分辨率走，但**不**跟着元素高度缩，
+    # 否则列表行里的编号会小到模型认不出来，或者大到自己压住邻居。
+    label_size = max(11, min(14, int(img.size[0] / 120)))
+    font = _load_font(label_size)
+    color = (220, 24, 24)
+
+    mapping: Dict[int, UIElement] = {}
+    occupied: List[Tuple[float, float, float, float]] = []
+
+    for num, el, rect, info in plan:
+        x0, y0, x1, y1 = rect
+
+        # 框里没有任何画面内容的「容器/文字」元素：画出来只会误导模型
+        # （这正是「框罩在空白处、一个叠一个」的主要来源）。
+        droppable = el.role in _DROPPABLE_EMPTY_ROLES or (
+            not (el.title or "").strip() and el.role in _UNNAMED_EMPTY_OK_ROLES
+        )
+        if (
+            info is not None
+            and not info.has_content
+            and droppable
+            and (x1 - x0) >= 16
+            and (y1 - y0) >= 12
+        ):
+            _a11y.bump_audit("dropped_empty")
+            continue
+
+        if shrink and info is not None and el.role in _SHRINKABLE_ROLES:
+            # 对「容器/文字」角色不设收缩上限：AX 给列表行的盒子常常是内容的
+            # 4~5 倍高，只有收到位，框才不会一个叠一个地压住邻居。
+            nx0, ny0, nx1, ny1 = shrink_box(rect, info, max_shrink=1.0)
+            if (nx0, ny0, nx1, ny1) != rect:
+                _a11y.bump_audit("shrunk")
+                x0, y0, x1, y1 = nx0, ny0, nx1, ny1
+                # 点击点也跟着落到内容中心，否则「框对了但点在外面」
+                el = _element_with_rect(el, x0 / coord_scale, y0 / coord_scale,
+                                        (x1 - x0) / coord_scale, (y1 - y0) / coord_scale)
+
+        # 边框：1px 细框，别把元素本身盖住（2px 在密集列表里会糊成一片）
+        draw.rectangle([x0, y0, x1, y1], outline=color, width=1)
+
         label = str(num)
         tw = draw.textlength(label, font=font)
-        th = font.size
+        th = label_size
         lx, ly = _label_anchor(x0, y0, x1, y1, tw, th, W, H, occupied)
         box = (lx - 1, ly - 1, lx + tw + 1, ly + th + 1)
-        draw.rectangle([box[0], box[1], box[2], box[3]], fill=color)
+        # 白描边 + 深红底：标签即便挨在一起，模型也能分清是「两个数字」而不是一个
+        draw.rectangle([box[0], box[1], box[2], box[3]], fill=color, outline=(255, 255, 255))
         draw.text((lx, ly - 1), label, fill=(255, 255, 255), font=font)
-        occupied.append(box)
+        occupied.append((box[0] - _LABEL_GAP, box[1] - _LABEL_GAP,
+                         box[2] + _LABEL_GAP, box[3] + _LABEL_GAP))
 
         mapping[num] = el
 
     return marked, mapping
+
+
+def _element_with_rect(el: UIElement, x: float, y: float, w: float, h: float) -> UIElement:
+    """复制一个元素并替换矩形（收缩后用于画框 + 点击中心）。
+
+    不复用原对象：元素列表还可能被上层用于其它用途（审计、稳定编号），
+    改了原对象会让「同一元素」在不同阶段坐标不一致。
+    """
+    return UIElement(
+        id=el.id, role=el.role, title=el.title, description=el.description,
+        x=x, y=y, w=w, h=h, app=el.app, kind=el.kind,
+        enabled=el.enabled, in_list=el.in_list,
+    )
 
 
 def build_som_mapping(
@@ -270,6 +402,8 @@ def build_som_mapping(
     stabilizer: Optional[MarkStabilizer] = None,
     skip_menubar: bool = True,
     draw: bool = True,
+    content_check: bool = True,
+    shrink: bool = True,
 ) -> Tuple[Image.Image, Dict[int, UIElement], List[UIElement]]:
     """完整流程：枚举元素 -> 画标记 -> 返回 (标记图, 映射, 元素列表)。
 
@@ -277,6 +411,7 @@ def build_som_mapping(
     stabilizer: 传入同一个实例即可让编号跨帧稳定。
     skip_menubar: 是否跳过菜单栏项（绝大多数任务用不到，且极占编号）。
     draw: False 时只枚举 + 分配编号，不往图上画（用于「纯坐标模式」的坐标吸附）。
+    content_check / shrink: 用截图像素校验并收缩元素框（见 draw_marks）。
     """
     if language:
         set_label_language(language)
@@ -290,7 +425,10 @@ def build_som_mapping(
         ]
         numbers = stabilizer.assign(visible) if stabilizer else list(range(1, len(visible) + 1))
         return img, {n: el for n, el in zip(numbers, visible)}, elements
-    marked, mapping = draw_marks(img, elements, coord_scale=coord_scale, stabilizer=stabilizer)
+    marked, mapping = draw_marks(
+        img, elements, coord_scale=coord_scale, stabilizer=stabilizer,
+        content_check=content_check, shrink=shrink,
+    )
     return marked, mapping, elements
 
 

@@ -21,6 +21,7 @@ agent:
   som_mode: marks
   som_max_marks: 60            # 单帧最多标多少个元素（太多会重叠，模型反而看不过来）
   som_frontmost_only: true     # 只标「最前面的应用 + 程序坞」，背景窗口的按钮不标
+  som_content_check: true      # 用截图像素校准元素框：空框丢弃、过大的框收缩到真实内容
   stop_on_grounding_error: true   # 定位失败时是否直接终止（false 则交给反思重试）
   dry_run: false             # true = 只规划不执行（安全调试）
 
