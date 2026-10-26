@@ -1,5 +1,15 @@
 #!/bin/bash
 # Yu-Agent 启动脚本：自动定位项目根目录 + 选择 Python 环境 + 检查依赖
+#
+# 用法：
+#   ./scripts/run.sh                     # 默认开 GUI
+#   ./scripts/run.sh web                 # 网页三模态感知自检
+#   ./scripts/run.sh doctor              # 环境自检
+#   ./scripts/run.sh test "打开浏览器"    # 离线 mock 跑一次
+#
+# 为什么要有这个脚本：`python -m yu_agent` 只在**装过包的那个解释器**里能用。
+# 本机默认的 `python3` 是 WorkBuddy 的隔离环境，没装这个包，直接跑就是
+# `No module named yu_agent`。脚本负责把解释器选对，不需要用户记 venv 路径。
 set -e
 
 # 定位项目根目录（本脚本在 scripts/ 下，根目录是上一级）
@@ -33,7 +43,7 @@ fi
 
 # 3. 检查关键依赖，缺失则提示安装
 MISSING=""
-for mod in pydantic yaml PIL requests; do
+for mod in pydantic yaml PIL; do
     if ! "$PYTHON" -c "import $mod" >/dev/null 2>&1; then
         MISSING="$MISSING $mod"
     fi
@@ -46,5 +56,11 @@ if [ -n "$MISSING" ]; then
     exit 1
 fi
 
-echo "启动 Yu-Agent GUI..."
-exec "$PYTHON" -m yu_agent gui
+# 4. 启动子命令（默认 gui）
+if [ $# -eq 0 ]; then
+    set -- gui
+fi
+if [ "$1" = "gui" ]; then
+    echo "启动 Yu-Agent GUI..."
+fi
+exec "$PYTHON" -m yu_agent "$@"

@@ -4,25 +4,39 @@
 
 ## 前置
 
+**`python -m yu_agent` 只在「装过这个包的解释器」里能用。** 本机默认的 `python3`
+是 WorkBuddy 的隔离环境，没装这个包，直接跑就是 `No module named yu_agent`。
+下面两种写法都行，**别再直接敲 `python -m yu_agent`**：
+
 ```bash
-# 使用项目虚拟环境（推荐）
+# ① 推荐：脚本会自动选对解释器，并把参数透传（默认 gui）
+./scripts/run.sh                 # = python -m yu_agent gui
+./scripts/run.sh web             # = python -m yu_agent web
+./scripts/run.sh doctor
+
+# ② 或者显式用项目 venv
 .venv/bin/python -m yu_agent <子命令>
-# 或直接启动脚本
-./scripts/run.sh
+.venv/bin/yu-agent <子命令>       # 等价（editable 安装的入口）
+
+# ③ 想直接敲 python 就先激活环境
+source .venv/bin/activate
 ```
+
+> 后文的 `ya` 都指 `.venv/bin/python -m yu_agent`。
 
 ## 命令一览
 
 | 命令 | 用途 | 是否需要 API Key |
 |------|------|-----------------|
-| `python -m yu_agent gui` | 启动图形界面 | 需要 |
-| `python -m yu_agent run "任务"` | 命令行执行一个 GUI 任务 | 需要 |
-| `python -m yu_agent test "任务"` | 离线测试完整闭环（mock 后端） | 不需要 |
-| `python -m yu_agent perceive` | **感知自检**：截屏 + 列出识别到的可点元素 | 不需要 |
-| `python -m yu_agent memory` | **查看长期记忆**（它到底记住了什么） | 不需要 |
-| `python -m yu_agent logs -n 50` | 查看日志文件路径 / 末尾内容 | 不需要 |
-| `python -m yu_agent screenshot` | 截屏保存到文件 | 不需要 |
-| `python -m yu_agent doctor` | 检查环境依赖 | 不需要 |
+| `ya gui` / `./scripts/run.sh` | 启动图形界面 | 需要 |
+| `ya run "任务"` | 命令行执行一个 GUI 任务 | 需要 |
+| `ya test "任务"` | 离线测试完整闭环（mock 后端） | 不需要 |
+| `ya perceive` | **感知自检**：截屏 + 列出识别到的可点元素 | 不需要 |
+| `ya web` | **网页三模态感知**（DOM+AXTree+OCR） | 不需要 |
+| `ya memory` | **查看长期记忆**（它到底记住了什么） | 不需要 |
+| `ya logs -n 50` | 查看日志文件路径 / 末尾内容 | 不需要 |
+| `ya screenshot` | 截屏保存到文件 | 不需要 |
+| `ya doctor` | 检查环境依赖 | 不需要 |
 
 ## 详细说明
 
@@ -127,33 +141,35 @@ python -m yu_agent memory --clear         # 清空（会再确认一次）
 一眼就能判断问题出在**插件没标记出来**还是**模型没点对**。
 
 ```bash
-python -m yu_agent perceive                    # 默认：只标当前窗口 + 程序坞
+python -m yu_agent perceive                    # 默认：只标当前窗口 + 程序坞（含 OCR 蓝框）
 python -m yu_agent perceive --max 30 -o /tmp/marks.png   # 再少标一些，只看重点
 python -m yu_agent perceive --dock-max 30      # 程序坞图标很多时调大
 python -m yu_agent perceive --max-apps 6       # 同时看屏幕上所有可见应用
 python -m yu_agent perceive --no-content       # 关掉「元素框校准」，对比看看差别
+python -m yu_agent perceive --no-ocr           # 关掉 OCR 补标注（只看 AX 红框）
 ```
 
 输出示例：
 
 ```
 屏幕截图：1512x982（逻辑像素）
-可见应用：6 个
-  · WorkBuddy（pid=11171）：47 个可点元素
-  · Safari浏览器（pid=1293）：9 个可点元素
-  · 微信（pid=1286）：9 个可点元素
-  程序坞元素：26 个
+可见应用：1 个
+  · WorkBuddy（pid=45088）：原始候选 136 个 → 保留 60 个（本应用上限 80）
+  程序坞元素：0 个
   坐标系校准：(0.0, 0.0)
-  标注校准：丢弃空框 6 个 / 收缩到内容 31 个 / 窗口外丢弃 4 个
+  标注校准：丢弃空框 3 个 / 收缩到内容 6 个 / 窗口外丢弃 0 个
+  数量上限：无名字图标丢弃 3 个 / 超出元素预算截断 59 个
+  去重降噪：套娃元素合并 6 个 / 噪声丢弃 8 个 / 屏幕外 0 个
   帧可信度：✓ 正常（0.86 的框落在有画面的位置）
-  合计标记：101 个
+  合计标记：68 个（提示词语言：en）
 
-── WorkBuddy：#1~#47（47 个）
-── Safari浏览器：#59~#66（8 个）
-── 程序坞：#76~#101（26 个）
+OCR 补标注：11 个蓝色框（后端 vision）
+
+── WorkBuddy：#1~#60（57 个）
+── 屏幕文字(OCR)：#61~#71（11 个）
 
 #21  WorkBuddy | 下拉框 | 搜索设置项   中心≈(416,138) 尺寸=134x30
-#69  Safari浏览器 | 输入框 | 智能搜索栏   中心≈(981,66) 尺寸=510x31
+#64  文字(OCR) | 发送   中心≈(681,742) 尺寸=48x20
 #90  程序坞图标 | 访达   中心≈(73,942) 尺寸=52x68
 ```
 
@@ -172,8 +188,20 @@ python -m yu_agent perceive --no-content       # 关掉「元素框校准」，�
 - 如果**列表里根本没有输入框** → 是标记（插件）的问题，去查辅助功能权限。
 - 如果输入框**在列表里但模型没点它** → 是模型的问题，改用能力更强的模型，
   或看下面「每次运行的排障记录」。
-- 如果**元素明显比屏幕上少**（例如只识别到一两个应用、程序坞只标了一半）→
-  调大 `loop.som_max_marks` / `loop.som_dock_max_marks` / `loop.som_max_apps`。
+- 如果**元素明显比屏幕上少** → 直接读下面几行数字（`perceive` 现在会解释「为什么少」）：
+
+```
+· WorkBuddy（pid=45088）：原始候选 136 个 → 保留 60 个（本应用上限 60）
+  数量上限：无名字图标丢弃 3 个 / 超出元素预算截断 59 个     ← 是预算砍的，调大 som_max_marks
+  去重降噪：套娃元素合并 6 个 / 噪声丢弃 8 个 / 屏幕外 0 个   ← 同一块矩形只留一个编号
+  标注校准：丢弃空框 3 个 / 收缩到内容 6 个 / 窗口外丢弃 0 个  ← 框里真的没画面内容
+OCR 补标注：11 个蓝色框（后端 vision）                      ← AX 之外，OCR 又补了这么多
+```
+
+  - `原始候选`很小（几十个）→ 这个应用**自己没把界面暴露给 AX**（Electron/自绘界面），
+    只能靠蓝框；纯图标按钮无文字，OCR 也补不了。
+  - `超出元素预算截断`非 0 → 调大 `agent.som_max_marks`（`perceive --max 90` 先试）。
+  - `丢弃空框`多 → 用 `--no-content` 对比，或看 §4「点击位置偏移」。
 
 #### 感知的覆盖范围（重要）
 
@@ -213,6 +241,22 @@ python -m yu_agent perceive --no-content       # 关掉「元素框校准」，�
 编号标签本身也做了避让：字号不超过元素高度的 0.7 倍，优先放在框外左侧
 （压在项目图标上，不挡文件名），所以密集列表里也不会跨行压住邻行。
 
+### 6.5 网页三模态感知（DOM + AXTree + OCR，需要 chrome 调试端口）
+
+```bash
+# 1) 用调试端口启动 Chrome（或让已开的 Chrome 暴露 9222）
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
+
+# 2) 现场看三路信号对齐后剩下什么（不调模型、不点鼠标）
+./scripts/run.sh web --shot /tmp/page.png
+./scripts/run.sh web --origin 0,88 --json     # 窗口有自定义工具栏时手动给内容区原点
+./scripts/run.sh web --no-ocr                  # 只看 DOM+AX，对比 OCR 的作用
+```
+
+输出会解释「为什么这个元素没标上」：`no_ax` / `aria_hidden` / `occluded` / `blank` /
+`name_mismatch` / `disabled_conflict`，每一条都对应 `perception/web/` 里的一段判定逻辑。
+需要 playwright（`pip install -e '.[browser]'`，`playwright install chromium` **只需一次**）。
+
 ### 7. 查看日志
 
 ```bash
@@ -244,6 +288,19 @@ cat runs/<时间戳>/trace.jsonl | python -m json.tool --json-lines
 - `action_raw_xy` 与 `action_final_xy` 不同 → 触发了**坐标吸附**（修正过）
 
 再打开对应的 `step_XX.png`，对照就能看出模型看的是不是你以为的那张图。
+
+**如果 step_XX.png 是纯黑的**，先看目录时间戳对不对：
+
+- 时间戳是刚才跑 `pytest` 的时段 → 那是**测试的假截图**（测试用 `Image.new()` 当屏幕，
+  默认全黑）。2026-10-26 之前的版本会把测试产物直接写进 `runs/`，现在测试已经改道到
+  临时目录，历史垃圾归档在 `runs/_test_artifacts_20261026/`（确认无用可整目录删掉）。
+- 真机跑任务时也是黑的 → 那是截屏权限/锁屏问题，日志会有
+  `截屏耗时 30.2s（异常）：通常是屏幕已锁定/显示器休眠/录屏权限受限`；
+  同时 `trace.jsonl` 里的 `frame_content_ratio` 会是 0（框一个都落不到画面上）。
+- 不想留截图（省磁盘 / 不留屏幕记录）：`loop.save_trace: false`，连目录都不会建。
+
+另外 `runs/` 目录名现在会**去重**（同一秒跑两次得到 `20261026-191635` 和
+`20261026-191635-2`），早期撞名会让两轮 trace 追加混写、`step_01.png` 互相覆盖。
 
 ## 结果复核 / 危险动作确认 / 暂停 / 成本
 
@@ -318,8 +375,10 @@ loop:
 
 ### 5. 屏幕上没有的元素怎么点（OCR 兜底）
 
-Electron / Canvas / 图片按钮在 AX 里根本不存在，这时：
+Electron / Canvas / 图片按钮在 AX 里根本不存在，这时有三条路：
 
+- **标注层（默认开）**：截图上的**蓝色编号框**就是 OCR 补出来的文字，`mark` 用法和红框一样。
+  配置 `loop.som_ocr` / `som_ocr_max` / `som_ocr_min_conf`，或 `perceive --no-ocr` 关掉对比。
 - 模型给坐标 → 程序用 OCR 把 `reason` 里提到的文字在屏幕上找出来，**离给的坐标不远才采纳**
   （默认 320px，配置 `loop.ocr_anchor` 可关）
 - 想主动用：技能 `click_text("发送")`、`read_screen_text()`、`ocr_status()`
@@ -334,7 +393,8 @@ print(build_default_registry().call("ocr_status"))
 PY
 ```
 
-要求 macOS 的 pyobjc-framework-Vision（已在 `macos` 依赖组里）。
+要求 macOS 的 pyobjc-framework-Vision（已在 `macos` 依赖组里）。`python -m yu_agent doctor`
+最后一行会显示当前可用的 OCR 后端。
 
 ---
 
@@ -351,7 +411,28 @@ uv pip install -e ".[macos,gui]" --python .venv/bin/python
 ## 常见问题排查
 
 ### 报 `No module named 'yu_agent'`
-包未安装，执行 `uv pip install -e ".[gui,local]" --python .venv/bin/python`。
+
+九成不是"没装包"，而是**用错了解释器**。三步定位：
+
+```bash
+# 1) 你现在敲的 python 是哪个？
+which python3 && python3 -c "import sys; print(sys.executable)"
+
+# 2) 它到底有没有这个包？
+python3 -c "import yu_agent; print(yu_agent.__file__)"   # ModuleNotFoundError = 没装
+
+# 3) 项目 venv 里有没有？
+.venv/bin/python -c "import yu_agent; print(yu_agent.__file__)"
+```
+
+- 第 2 步失败、第 3 步成功 → **换个解释器**，用 `./scripts/run.sh <子命令>`
+  或 `.venv/bin/python -m yu_agent <子命令>`（`run.sh` 会自动选 venv 并透传参数）。
+- 两步都失败 → 真的没装：`uv pip install -e ".[gui,macos]" --python .venv/bin/python`。
+- 都成功但运行还是报 → 检查当前目录：`python -m` 需要在**项目根目录**执行，
+  或者包是以 editable 方式装进 venv 的（`.venv/lib/.../__editable__*.pth` 指向 `src/`）。
+
+> 本机历史坑：`.venv` 是 uv 装的 editable 包（**没有 pip**，`python -m pip` 也会报错），
+> 默认 `python3` 又是 WorkBuddy 隔离环境，所以"看着装了却导不进来"。
 
 ### 报 `No module named 'pydantic'` 等
 依赖未装全，执行完整安装命令（见上）。

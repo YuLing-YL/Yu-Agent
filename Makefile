@@ -3,7 +3,7 @@ PY ?= .venv/bin/python
 UV_CACHE_DIR ?= .uv-cache
 export UV_CACHE_DIR
 
-.PHONY: help venv install dev test lint fmt doctor screenshot demo gui clean
+.PHONY: help venv install dev test lint fmt doctor screenshot demo gui web clean
 
 help:  ## 显示所有可用命令
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -26,8 +26,9 @@ test:  ## 跑单元 + 回放测试（不需要屏幕和 API key）
 test-gui:  ## 跑需要真实屏幕/权限的测试
 	RUN_GUI_TESTS=1 $(PY) -m pytest -m gui
 
-lint:  ## 静态检查
+lint:  ## 静态检查（ruff 查风格/真错，mypy 查类型）
 	$(PY) -m ruff check src tests
+	$(PY) -m mypy
 
 fmt:  ## 自动格式化 + 修 lint
 	$(PY) -m ruff check --fix src tests
@@ -35,6 +36,9 @@ fmt:  ## 自动格式化 + 修 lint
 
 doctor:  ## 自检：依赖、权限、配置、屏幕
 	$(PY) -m yu_agent doctor
+
+web:  ## 网页三模态感知（需 Chrome --remote-debugging-port=9222）
+	$(PY) -m yu_agent web
 
 screenshot:  ## 抓一张当前屏幕到 runs/，用于确认权限
 	$(PY) -m yu_agent screenshot

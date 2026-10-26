@@ -15,11 +15,11 @@ observe(截屏) → recall(取记忆) → think(规划/拆分) → ground(定位
 
 | 目录 | 存放什么 | 是否入库 | 状态 |
 |---|---|---|---|
-| `src/yu_agent/` | **唯一可安装的 Python 包**，全部业务代码 | 是 | 已实装（约 5900 行） |
+| `src/yu_agent/` | **唯一可安装的 Python 包**，全部业务代码 | 是 | 已实装（约 14000 行 / 101 个 .py） |
 | `config/` | 非代码配置：全局默认参数 | 是（密钥除外） | 已实装 |
 | `data/` | 运行时数据：用户配置、日志、长期记忆库 | 目录入库，数据不入库 | 已实装 |
 | `runs/` | 每次运行的产物（截图 + 轨迹），一次性 | **整目录忽略** | 已实装 |
-| `tests/` | 测试：冒烟、停止逻辑等 | 是 | 部分实装 |
+| `tests/` | 测试：冒烟、停止逻辑、标注质量、JSON 解析、安全分级等（171 passed） | 是 | 已实装 |
 | `scripts/` | 开发与启动脚本 | 是 | 已实装 |
 | `eval/` | 评测：任务用例（tasks.yaml）、判据、运行器、报告 | 用例入库，报告不入库 | 已实装 |
 | `.workbuddy/` | 工具私有记忆（项目工作日志） | 忽略 | 自动维护 |
@@ -59,8 +59,10 @@ observe(截屏) → recall(取记忆) → think(规划/拆分) → ground(定位
 | `__init__.py` | 通用工具包声明 |
 | `errors.py` | 统一异常体系：`YuAgentError / ConfigError / ModelError / EnvError / GroundingError / SafetyViolation / SkillNotFoundError` |
 | `logging.py` | 日志初始化，同时输出控制台与文件 `data/logs/yu_agent.log`（轮转保留 3 份） |
-| `paths.py` | 项目路径管理：定位项目根、`runs/<时间戳>` 目录分配、数据目录 |
-| `image.py` | 图像工具：缩放、base64 编码、图像差分、感知哈希 |
+| `paths.py` | 项目路径管理：项目根、`runs/<时间戳>` 目录分配（支持 `YU_AGENT_RUNS_DIR` 改道、同秒去重）、数据目录 |
+| `image.py` | 图像工具：缩放、base64 编码、图像差分、感知哈希、纯色/纯黑判定（`is_blank`） |
+| `jsonx.py` | ★ 全项目唯一的 JSON 抽取实现：按大括号配对并跳过字符串内的括号，支持嵌套 `args` / `params` / `position` / `to`（旧的 `\{[^{}]*\}` 正则会静默解析失败） |
+| `redact.py` | trace 落盘前的密钥脱敏：`sk-` / `ghp_` / `AKIA` / `Bearer` / `api_key=` 等统一打码 |
 | `tracing.py` | 步骤追踪：把每步（截图 + 动作 + 结果 + token + 耗时）写入 `runs/<ts>/trace.jsonl` |
 
 ### 3.3 `models/` — VLM 后端（只负责"调模型"）
@@ -84,10 +86,14 @@ observe(截屏) → recall(取记忆) → think(规划/拆分) → ground(定位
 |---|---|
 | `__init__.py` | 导出 `Observation` 等 |
 | `observation.py` | `Observation` 数据结构：图像 + 元素树 + 窗口 + 屏幕几何 |
-| `screenshot.py` | 跨平台截屏（macOS `screencapture`/Quartz，负责把物理像素缩回逻辑像素） |
-| `a11y.py` | **辅助功能树（AXUIElement）**：枚举可交互元素的位置/尺寸/角色/标题，SOM 标记的数据来源（717 行，核心） |
-| `som.py` | Set-of-Mark：在截图上给元素画编号框，模型输出编号即可精确定位 |
-| `ocr.py` | OCR 兜底：无 a11y 时从像素取文字（需 pytesseract） |
+| `screenshot.py` | 跨平台截屏（macOS 走 Quartz，负责把物理像素缩回逻辑像素；其它平台回退 pyautogui） |
+| `a11y.py` | **辅助功能树（AXUIElement）**：枚举可交互元素的位置/尺寸/角色/标题，SOM 标记的数据来源（约 1180 行，核心） |
+| `som.py` | Set-of-Mark：在截图上给元素画编号框（红=AX、蓝=OCR），模型输出编号即可精确定位 |
+| `ocr.py` | OCR 统一入口：macOS Vision 优先、pytesseract 兜底、都没有就明说不可用 |
+| `vision_ocr.py` | macOS Vision 原生实现：归一化左下坐标 → 像素左上坐标 |
+| `ocr_marks.py` | **OCR 补标注**：AX 盲区用蓝色编号框补上；文字去重、给无名图标补名字 |
+| `web/` | **网页三模态融合**（DOM 布局 + AXTree + 截图 OCR）：`layout.py` `axtree.py` `align.py` `visual.py` `fusion.py` `collect.py`，详见 `docs/THREE_MODALITY_FUSION.md` |
+| `content.py` | 用截图像素校验元素框（空框判定 / 过大框收缩） |
 | `ui_tree.py` | UI 元素树结构化表示（可选增强，当前极简） |
 
 ### 3.5 `env/` — 「在哪操作」：平台驱动
@@ -129,7 +135,8 @@ observe(截屏) → recall(取记忆) → think(规划/拆分) → ground(定位
 | 文件 | 作用 |
 |---|---|
 | `__init__.py` | 导出 `approve_action` |
-| `policy.py` | 安全策略：危险动作类型、危险 shell、删除/支付/发送类文案拦截 + 提示词注入防护 |
+| `policy.py` | 硬规则：危险动作类型、危险 shell。配置只能**追加**拦截项，不能把安全基线减掉 |
+| `risk.py` | 语义分级：结合目标元素上的**文字**判断 low/high/critical。「关闭/退出」单独出现不算高风险，必须和不保存/放弃同时出现才升级 |
 | `approval.py` | 动作审批：自动放行 / 控制台询问 / 全拒（测试用） |
 
 ### 3.9 `prompts/` — 版本化提示词（纯文本，改 prompt 不碰代码）
@@ -137,7 +144,9 @@ observe(截屏) → recall(取记忆) → think(规划/拆分) → ground(定位
 | 文件 | 作用 |
 |---|---|
 | `loader.py` | 加载模板并做 `{{var}}` 变量替换 |
+| `i18n.py` | 中英文提示词选择（`system.md` / `system.en.md`） |
 | `system.md` | 系统角色与输出格式约定（含"整个任务最多只允许输出一次 plan"等约束） |
+| `system.en.md` | 英文版系统提示词（模型对英文更敏感时的备选） |
 | `planner.md` | 规划：给定任务 + 历史 + 元素列表 → 下一个动作（预留记忆槽位） |
 | `grounder.md` | 定位：把目标描述转成坐标 |
 | `reflector.md` | 反思：卡住/失败时的自我批评与纠偏 |
@@ -153,8 +162,8 @@ observe(截屏) → recall(取记忆) → think(规划/拆分) → ground(定位
 | `semantic.py` | L3 语义记忆：环境知识（app/元素/快捷键/登录态，带失效字段） |
 | `episodic.py` | L4 情景记忆：过往完整轨迹存取与检索（few-shot 来源） |
 | `profile.py` | 用户画像：偏好、常用 App、安全偏好 |
-| `store.py` | 记忆存储后端：SQLite(FTS5) / JSONL / 内存（测试用） |
-| `retrieval.py` | 检索与重排：关键词/BM25 + app 过滤（向量暂不做） |
+| `store.py` | 记忆存储后端：SQLite（文件或 `:memory:` 测试用），`LIKE` 检索 + `(kind, app)` 过滤 |
+| `retrieval.py` | 检索与重排：关键词打分 + app 过滤（BM25/向量暂不做） |
 | `distillation.py` | 离线蒸馏：任务轨迹 → 技能/教训（成功与失败分开结晶） |
 
 ### 3.11 `agent/` — 循环本体
@@ -162,9 +171,17 @@ observe(截屏) → recall(取记忆) → think(规划/拆分) → ground(定位
 | 文件 | 作用 |
 |---|---|
 | `__init__.py` | 导出 `AgentLoop / Planner / Reflector / Responder / AgentState` |
-| `loop.py` | ★ **核心主循环**：`AgentLoop.run(task) -> Trajectory`，含多层自动停止、注入防护、子任务推进（865 行） |
+| `loop.py` | ★ **核心主循环**：`AgentLoop.run(task) -> AgentState`。`run` 已拆成 `_observe / _decide / _ground / _act / _verify / _post_action` 等分阶段方法，状态收进 `StepCounters`（约 1900 行） |
 | `planner.py` | 组装 prompt（历史 + 元素 + 截图 + 记忆提示）并调用模型 |
-| `responder.py` | 意图识别 + 回复：先判断输入是否需要操作屏幕，纯闲聊只回复不调 agent |
+| `responder.py` | 意图识别 + 回复：先判断输入是否需要操作屏幕，纯闲聊只回复不调 agent。回复**强制简体中文**（英文会被自动翻译，翻译失败走中文模板兜底） |
+| `control.py` | `RunControl`：停止标志 + 审批人回调，贯穿整个循环 |
+| `guard.py` | `ActionGuard`：风险闸门 + 提示词注入识别与"那只是界面文字"提示 |
+| `finish_gate.py` | 「完成」前的自检闸门：别把半成品当成功 |
+| `ask_flow.py` | 向用户提问的人机往返（阻塞等回答，带超时） |
+| `anchor.py` | 坐标锚点与坐标系校准 |
+| `describe.py` | 元素与画面的文字描述（注入 prompt 用） |
+| `usage.py` | token / 费用统计 |
+| `verify.py` | 动作后校验：屏幕是否变化、期望文字是否出现 |
 | `reflect.py` | 反思者：卡死检测（重复动作/无变化）与任务结束后的总结纠偏 |
 | `state.py` | 运行状态：`Task / StepRecord / Trajectory / RunState / AgentState` |
 
@@ -181,10 +198,10 @@ observe(截屏) → recall(取记忆) → think(规划/拆分) → ground(定位
 | 文件 | 作用 |
 |---|---|
 | `__init__.py` | GUI 包入口，导出 `MainWindow / run_gui` |
-| `app.py` | 主窗口：需求输入框 + 模型切换下拉 + 实时截图预览 + 执行日志（474 行） |
-| `floating.py` | 悬浮控制条：任务运行时置顶、跨桌面可见，含停止/唤回主窗口、可拖动（200 行） |
-| `settings_dialog.py` | 设置对话框：API 配置（base_url / api_key / 模型名）+ 测试连接（170 行） |
-| `theme.py` | GUI 主题样式（QSS）（265 行） |
+| `app.py` | 主窗口：需求输入框 + 模型切换下拉 + 标注图 / 编号表 / 模型原文 / 单步执行 + 执行日志 |
+| `floating.py` | 悬浮控制条：任务运行时置顶、跨桌面可见，含停止/唤回主窗口、可拖动 |
+| `settings_dialog.py` | 设置对话框：API 配置（base_url / api_key / 模型名）+ 测试连接 |
+| `style.py` | GUI 主题样式（QSS） |
 | `worker.py` | 后台执行线程：先做意图识别，再决定是否调用 GUI agent |
 
 ---
@@ -206,7 +223,7 @@ observe(截屏) → recall(取记忆) → think(规划/拆分) → ground(定位
 | `data/.gitkeep` | 占位，保证目录入库 |
 | `data/config/user.yaml` | **GUI 设置页保存的模型配置**：`model_config`（当前模型）+ `saved_models`（历史模型列表），已被 gitignore |
 | `data/logs/yu_agent.log` | 运行日志（自动轮转） |
-| `data/memory/yu_agent.sqlite` | ★ **长期记忆落盘**（SQLite/FTS5），与一次性的 `runs/` 严格分开；sqlite 不入库 |
+| `data/memory/yu_agent.sqlite` | ★ **长期记忆落盘**（SQLite 单表），与一次性的 `runs/` 严格分开；sqlite 不入库 |
 
 ### `runs/`（每次运行产物，整目录 gitignore）
 
@@ -221,11 +238,18 @@ observe(截屏) → recall(取记忆) → think(规划/拆分) → ground(定位
 
 | 文件 | 作用 |
 |---|---|
+| `conftest.py` | **pytest 全局隔离**：导入 yu_agent 前把 runs/ 与 data/ 改道到临时目录（否则每跑一次测试就往用户真实 runs/ 里塞全黑假截图） |
 | `test_smoke.py` | 端到端冒烟：核心模块可导入 + 坐标还原 + 意图识别（离线，无需 API/屏幕） |
 | `test_stop_logic.py` | 停止逻辑：验证"任务完成不重复点击""点停止立即生效"（打桩避开真实截屏/鼠标） |
-| `unit/.gitkeep` | 规划中的纯函数单测目录（占位） |
-| `integration/.gitkeep` | 规划中的跨模块测试目录（mock env + mock 模型，占位） |
-| `replay/.gitkeep` | 规划中的轨迹离线重放目录（CI 不依赖屏幕与 key，占位） |
+| `test_runs_dir.py` | 运行记录目录：环境变量改道、同秒不撞名、`save_trace=false` 不落盘 |
+| `test_ocr_marks.py` | OCR 补标注（蓝色框）：噪声过滤、与 AX 去重、补名字、预算分配 |
+| `test_marks_quality.py` | 标注质量：编号跨帧稳定、标签避让、降噪、语义纠正、som_mode |
+| `test_content_marks.py` | 元素框像素校准：空框判定、过大框收缩、幽灵元素 |
+| `test_a11y_generic.py` | 通用 a11y 遍历：容器穿透、遮挡过滤、预算分配 |
+| `test_input_replace.py` / `test_input_module.py` | 输入覆盖语义（⌘A）与中文剪贴板粘贴 |
+| `test_ocr.py` | Vision OCR：坐标是左上原点、带装饰文字命中、远距离不锚定 |
+| `test_safety.py` / `test_verify.py` / `test_control.py` | 审批与注入、结果复核、暂停/提问/重规划 |
+| `test_open_app.py` / `test_skills_io.py` / `test_memory.py` / `test_step_mode.py` / `test_responder.py` | 应用查找、技能 IO、分层记忆、单步调试、意图识别 |
 
 ### `scripts/`
 
@@ -288,6 +312,6 @@ perception/  models/
 |---|---|
 | `src/yu_agent/`（含 gui / skills） | ✅ 已实装，核心闭环可运行 |
 | `config/`、`data/`、`runs/`、`scripts/`、顶层文件 | ✅ 已实装 |
-| `tests/` | ✅ 已实装（11 个测试文件，97 passed） |
+| `tests/` | ✅ 已实装（22 个测试文件，171 passed；conftest 把 runs/data 隔离到临时目录） |
 | `eval/` | ✅ 已实装（tasks.yaml + checks + runner + compare），缺基线数据 |
 | `config/experiments/`、`config/models/` | ⏳ 尚未创建（用 `user.yaml` 覆盖即可，暂不需要） |

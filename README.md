@@ -85,23 +85,33 @@ observe(截屏) → recall(取记忆) → think(规划/拆分任务) → ground(
 # 1. 安装依赖（含 GUI）
 pip install -e ".[macos,gui]"
 
-# 2. 启动图形界面
+# 2. 激活环境（关键：`python -m yu_agent` 只有装过包的那个解释器能用）
+source .venv/bin/activate
+# 不想激活也可以：统一用 ./scripts/run.sh <子命令>（会自动选 venv 并透传参数）
+
+# 3. 启动图形界面
 python -m yu_agent gui
 # 或
 ./scripts/run.sh
 
-# 3. 命令行执行任务（需先配置 API）
-python -m yu_agent run "打开浏览器搜索天气"
+# 4. 命令行执行任务（需先配置 API）
+./scripts/run.sh run "打开浏览器搜索天气"
 
-# 4. 离线测试闭环（mock 后端，无需 API 和屏幕）
-python -m yu_agent test "打开浏览器搜索天气"
+# 5. 离线测试闭环（mock 后端，无需 API 和屏幕）
+./scripts/run.sh test "打开浏览器搜索天气"
 
-# 5. 环境自检
-python -m yu_agent doctor
+# 6. 环境自检
+./scripts/run.sh doctor
 
-# 6. 截屏测试
-python -m yu_agent screenshot -o screenshot.png
+# 7. 截屏测试
+./scripts/run.sh screenshot -o screenshot.png
+
+# 8. 提交前自查：pytest + ruff + mypy 三道闸门
+make test && make lint
 ```
+
+> 报 `No module named 'yu_agent'` 几乎都是解释器不对：本机默认 `python3` 是隔离环境，
+> 没装这个包。用 `./scripts/run.sh` 或先 `source .venv/bin/activate` 即可，详见 `COMMANDS.md`。
 
 首次使用需在「系统设置 → 隐私与安全性」授予 **屏幕录制** 与 **辅助功能** 权限。
 
@@ -115,7 +125,7 @@ python -m yu_agent screenshot -o screenshot.png
 
 ```
 Yu-Agent/
-├── pyproject.toml            # 打包 + 依赖 + pytest/ruff/mypy 配置（核心依赖仅 pydantic/pyyaml/pillow）
+├── pyproject.toml            # 打包 + 依赖 + pytest/ruff/mypy 配置（核心依赖仅 pydantic/pyyaml/pillow/requests）
 ├── Makefile                  # 任务入口：install / dev / test / lint / doctor / demo
 ├── .env.example              # 密钥模板（真实 .env 不入库）
 ├── .gitignore                # 已忽略 runs/、.env、__pycache__、.DS_Store 等
@@ -128,13 +138,16 @@ Yu-Agent/
 ├── src/yu_agent/             # ★ 唯一可安装包（src-layout，import yu_agent）
 │   ├── __init__.py
 │   ├── __main__.py           #   python -m yu_agent 入口
-│   ├── cli.py                #   子命令：doctor / run / replay / screenshot
-│   ├── settings.py           #   配置加载：default.yaml + experiment 覆盖 + 环境变量
+│   ├── cli.py                #   子命令：run / test / screenshot / perceive / web / memory / logs / gui / doctor
+│   ├── agent_facade.py       #   YuAgent 门面：配置 → 各层组件的装配（GUI 与 CLI 共用）
+│   ├── settings.py           #   配置加载：default.yaml + experiment 覆盖 + 环境变量（pydantic 强校验）
 │   │
 │   ├── common/               # 无业务含义的通用工具（最底层，不依赖任何其他模块）
 │   │   ├── logging.py        #   日志初始化
-│   │   ├── paths.py          #   项目路径、runs/<timestamp> 目录分配
-│   │   ├── image.py          #   图像读写、缩放、base64、差分、感知哈希
+│   │   ├── paths.py          #   项目路径、runs/<timestamp> 目录分配、旧运行目录轮转（prune_runs）
+│   │   ├── image.py          #   图像读写、缩放、base64、差分、感知哈希、纯色/纯黑判定
+│   │   ├── jsonx.py          #   ★ 全项目唯一的 JSON 抽取实现（大括号配对，支持嵌套 args/position）
+│   │   ├── redact.py         #   trace 落盘前的密钥脱敏（sk-/ghp_/AKIA/Bearer/api_key=）
 │   │   ├── tracing.py        #   逐步写 steps.jsonl（截图 + 动作 + 结果 + token + 耗时）
 │   │   └── errors.py         #   异常体系（ConfigError/ModelError/EnvError/GroundingError/SafetyViolation）
 │   │
@@ -151,11 +164,21 @@ Yu-Agent/
 │   │
 │   ├── perception/           # 「看」：产出 Observation
 │   │   ├── observation.py    #   Observation 数据结构（图像 + 元素树 + 窗口 + 屏幕几何）
-│   │   ├── screenshot.py     #   截屏实现（macOS screencapture / mss / PIL ImageGrab）
+│   │   ├── screenshot.py     #   截屏实现（macOS Quartz 抓图后缩回逻辑像素 / 其它平台回退）
 │   │   ├── ui_tree.py        #   UIElement 树、a11y/DOM/OCR 统一表示、检索、渲染成 prompt 文本
-│   │   ├── a11y.py           #   辅助功能树读取（macOS AXUIElement）
-│   │   ├── ocr.py            #   OCR 兜底（无 a11y 时从像素取文字）
-│   │   └── som.py            #   Set-of-Mark：在截图上画编号框
+│   │   ├── a11y.py           #   辅助功能树读取（macOS AXUIElement，深度/数量可配置）
+│   │   ├── ocr.py            #   OCR 统一入口：优先 macOS Vision，退而 pytesseract
+│   │   ├── vision_ocr.py     #   macOS Vision 原生 OCR（归一化坐标 → 逻辑像素）
+│   │   ├── ocr_marks.py      #   ★ OCR 补标注：AX 盲区里的纯文字元素补成蓝框编号
+│   │   ├── content.py        #   内容占比分析（有无 numpy 都能跑，没装就降级不校准）
+│   │   ├── som.py            #   Set-of-Mark：画编号框 + 跨帧编号稳定器
+│   │   └── web/              #   网页三模态融合（DOM + AXTree + 视觉）
+│   │       ├── collect.py    #     CDP 抓 DOMSnapshot / 截图
+│   │       ├── layout.py     #     LayoutTree 解析（bounds/styles/shadow host）
+│   │       ├── axtree.py     #     浏览器 AXTree 解析
+│   │       ├── visual.py     #     视觉核对：文字/名字/遮挡/可见性
+│   │       ├── align.py      #     三路目标对齐
+│   │       └── fusion.py     #     融合成统一 UIElement
 │   │
 │   ├── env/                  # 「在哪操作」：平台驱动，实现 GUIEnv
 │   │   ├── base.py           #   GUIEnv Protocol（start/observe/screen_geometry/primitives/close）
@@ -181,11 +204,13 @@ Yu-Agent/
 │   │   └── verify.py         #   动作后校验：屏幕是否变化、期望文字是否出现
 │   │
 │   ├── safety/               # 安全闸门（不可逆操作前的拦截与审批）
-│   │   ├── policy.py         #   规则：危险动作类型、危险 shell、删除/支付/发送类 UI 文案
+│   │   ├── policy.py         #   硬规则：危险动作类型、危险 shell（配置只能追加不能减）
+│   │   ├── risk.py           #   语义分级：结合目标元素文字判断 low/high/critical
 │   │   └── approval.py       #   审批接口：自动放行 / 控制台询问 / 全拒（测试用）
 │   │
 │   ├── prompts/              # 版本化提示词（纯文本，改 prompt 不用碰 Python）
 │   │   ├── loader.py         #   加载 + {{var}} 渲染
+│   │   ├── i18n.py           #   中英文提示词选择（system.md / system.en.md）
 │   │   ├── system.md         #   系统角色与输出格式约定
 │   │   ├── planner.md        #   规划：给定任务+历史+元素列表 → 下一个动作
 │   │   ├── grounder.md       #   定位：把目标描述转成坐标
@@ -198,15 +223,37 @@ Yu-Agent/
 │   │   ├── semantic.py       #   L3 环境知识（app/元素/快捷键/登录态，带失效字段）
 │   │   ├── episodic.py       #   L4 过往轨迹存取与检索（few-shot 来源）
 │   │   ├── profile.py        #   用户偏好与安全偏好
-│   │   ├── store.py          #   后端：sqlite(FTS5) / jsonl / in-memory（测试用）
-│   │   ├── retrieval.py      #   检索与重排：关键词/BM25 + app 过滤（向量可选，暂不做）
+│   │   ├── store.py          #   后端：SQLite（文件或 :memory:），LIKE 检索 + (kind, app) 过滤
+│   │   ├── retrieval.py      #   检索与重排：关键词打分 + app 过滤（BM25/向量留作后续，暂不做）
 │   │   └── distillation.py   #   离线：任务轨迹 → 技能 / 教训（成功与失败分开结晶）
 │   │
 │   └── agent/                # ★ 循环本体
-│       ├── loop.py           #   AgentLoop.run(task) -> Trajectory
+│       ├── loop.py           #   AgentLoop.run(task) -> AgentState（分阶段方法，不再是一个巨型 run）
 │       ├── planner.py        #   组装 prompt（历史 + 元素 + 截图 + 记忆提示）并调用模型
-│       ├── state.py          #   Task / StepRecord / Trajectory / RunState
+│       ├── state.py          #   Task / StepRecord / Trajectory / RunState / AgentState
+│       ├── responder.py      #   意图识别：纯对话 or 需要操作屏幕（回复强制简体中文）
+│       ├── control.py        #   RunControl：停止标志 + 审批人回调
+│       ├── guard.py          #   ActionGuard：风险闸门 + 提示词注入识别
+│       ├── finish_gate.py    #   「完成」前的自检：别把半成品当成功
+│       ├── ask_flow.py       #   向用户提问的人机往返
+│       ├── anchor.py         #   坐标锚点/校准
+│       ├── describe.py       #   元素与画面的文字描述（注入 prompt 用）
+│       ├── usage.py          #   token / 费用统计
 │       └── reflect.py        #   卡死检测（重复动作/无变化）与纠偏
+│
+│   ├── skills/               # 「能直接调的本事」：Python 插件函数，注册后注入 prompt
+│   │   ├── registry.py       #   Skill 元数据 + @skill 装饰器注册
+│   │   ├── builtin.py        #   应用启动/激活、键鼠、程序坞
+│   │   ├── screen.py         #   按文字点击、读屏文字（走 OCR）
+│   │   ├── files.py          #   文件读写/列目录/搜索
+│   │   └── clipboard.py      #   剪贴板读写（macOS pbcopy/pbpaste，其它平台 pyperclip）
+│   │
+│   └── gui/                  # 图形界面（PySide6）
+│       ├── app.py            #   主窗口：标注图 / 编号表 / 模型原文 / 单步执行
+│       ├── worker.py         #   后台线程：意图识别 → agent 执行，信号回传 UI
+│       ├── floating.py       #   置顶悬浮控制条（跨桌面/全屏可见，可拖动、有停止）
+│       ├── settings_dialog.py#   模型与 API key 设置
+│       └── style.py          #   样式表
 │
 ├── eval/                     # 评测（和 tests 是两回事：这里量的是「成功率」）
 │   ├── tasks.yaml            #   任务用例定义（加用例只改这里）
@@ -215,14 +262,21 @@ Yu-Agent/
 │   ├── compare.py            #   两次结果的 A/B 对比
 │   └── reports/              #   报告产物（不入库）
 │
-├── tests/                    # 单元 + 冒烟测试（平铺，97 passed）
+├── tests/                    # 单元 + 冒烟测试（平铺，171 passed）
+│   ├── conftest.py           #   ★ 把 runs/ 与 data/ 重定向到临时目录，测试不再污染真实产物
 │   ├── test_smoke.py         #   离线闭环：mock 模型跑完整循环
 │   ├── test_stop_logic.py    #   停止逻辑（重复动作/无变化/步数上限）
 │   ├── test_marks_quality.py / test_content_marks.py   # 标注质量与框校准
+│   ├── test_ocr_marks.py     #   OCR 补标注（蓝框）的位置/去重/置信度
 │   ├── test_a11y_generic.py  #   a11y 通用命名/去重/降噪
 │   ├── test_input_module.py / test_input_replace.py    # 输入与旧内容覆盖
-│   ├── test_memory.py        #   短期/长期记忆
-│   └── test_open_app.py / test_responder.py / test_step_mode.py
+│   ├── test_jsonx.py         #   ★ JSON 抽取（嵌套 args/position、字符串内括号、空 type）
+│   ├── test_responder.py     #   意图识别 + 回复必须是简体中文
+│   ├── test_runs_dir.py      #   运行目录轮转 + 纯黑帧告警
+│   ├── test_finish_gate.py   #   ★ 收尾闸门：模型说完成 ≠ 真完成（打回/如实标注失败）
+│   ├── test_safety.py        #   风险分级 / 审批 / 提示词注入
+│   ├── test_web_fusion.py    #   三模态融合（DOM + AXTree + 视觉）
+│   └── test_memory.py / test_open_app.py / test_step_mode.py / test_verify.py / test_ocr.py / test_skills_io.py
 │
 ├── scripts/run.sh            # 启动脚本
 ├── data/                     # 运行时数据（目录入库，数据不入库）
@@ -250,7 +304,9 @@ Yu-Agent/
 三条工程约定：
 
 1. **写入时机**：在线循环里不让模型每步写记忆（噪声大且贵）。任务结束后由 `distillation.py` 统一蒸馏，离线可批量重跑。
-2. **检索方式**：`sqlite + FTS5` 关键词检索 + `(app, 窗口标题)` 过滤。GUI 领域查询短、范围窄，通常优于向量检索，且**零新增依赖**；向量留作后续可选增强。
+2. **检索方式**：`SQLite` 单表 + `content/task LIKE` 关键词检索 + `(kind, app)` 过滤，`created_at DESC` 排序。GUI 领域查询短、范围窄，这样已经够用，且**零新增依赖**。
+   > 说明：早期设计文档写的是 `FTS5`，实际没落地——建表时就没建虚拟表，`search()` 一直是 `LIKE`。
+   > 之所以先不上 FTS5：中文没有分词器时 FTS5 的按字切分会退化，反而比 `LIKE` 差；等真有大规模检索需求，更值得上的是向量检索而不是 FTS5。
 3. **必须能证明有用**：目标是给 `eval/tasks.yaml` 加 `use_memory` 开关，同一套用例跑 on/off 对比成功率、平均步数、成本——目前还没接（`config/default.yaml` 里只留了 flag 名）。在没测出对比之前，不能假定记忆一定在帮忙。
 
 ## 分层依赖规则
