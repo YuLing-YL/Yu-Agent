@@ -90,6 +90,13 @@ def _to_action(data: Dict[str, Any]) -> Action:
     x2 = data.get("x2", data.get("to_x", endpoint.get("x")))
     y2 = data.get("y2", data.get("to_y", endpoint.get("y")))
 
+    # type 的「覆盖」语义：模型可能写在顶层（"replace": true），
+    # 也可能写在 args 里。统一收进 args，executor 从那里读。
+    args = dict(data.get("args", data.get("params", {})) or {})
+    for key in ("replace", "clear", "clear_first", "select_all"):
+        if key in data and key not in args:
+            args[key] = data[key]
+
     return Action(
         type=str(data.get("type", data.get("action", ""))).lower(),
         x=_opt_int(data.get("x")),
@@ -102,7 +109,7 @@ def _to_action(data: Dict[str, Any]) -> Action:
         duration=float(data.get("duration", 0.1)),
         reason=str(data.get("reason", data.get("thought", ""))),
         skill=data.get("skill"),
-        args=data.get("args", data.get("params", {})) or {},
+        args=args,
     )
 
 

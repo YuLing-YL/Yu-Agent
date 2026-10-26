@@ -60,6 +60,13 @@ _INPUT_ROLES = {
 # 角色识别不出来时，用标题/描述里的关键词兜底
 _INPUT_KEYWORDS = ("搜索", "输入", "地址", "网址", "search", "url", "输入框", "查找")
 
+# 「单行」输入角色：在这类框里输入新内容，语义几乎总是「替换旧词」
+# （搜索框、浏览器地址栏、表单单行输入）。多行文本域不在其中 ——
+# 往文档里写正文时全选覆盖会把用户已有内容删掉。
+_SINGLE_LINE_INPUT_ROLES = {
+    "AXTextField", "AXSearchField", "AXSecureTextField", "AXComboBox",
+}
+
 
 def _quantize(v: Optional[int]) -> Optional[int]:
     """把坐标量化到网格，消除模型输出的几像素抖动。"""
@@ -278,6 +285,8 @@ class AgentLoop:
         self.max_plan_rejects = self.cfg.get("max_plan_rejects", 2)
         # 「已点击但还没输入文字」的输入框描述（由 _build_input_hint 回灌给模型）
         self._pending_input: Optional[str] = None
+        # 上一步点击的输入框角色（用于决定下一步 type 要不要「全选覆盖」）
+        self._pending_input_role: str = ""
         # 标注模式：
         #   marks  —— 在截图上画编号框，模型输出编号（默认，最准）
         #   coords —— 不画框，让模型直接给像素坐标（坐标会吸附最近的元素）
@@ -648,6 +657,34 @@ class AgentLoop:
                         log.info("用户已停止，本步动作不再执行。")
                         break
 
+                    # 5.8 输入覆盖语义：
+                    #     上一步点的是**单行**输入框（搜索框/地址栏/输入框），
+                    #     这一步又直接 type，就默认「替换」而不是「追加」。
+                    #     实测模型想搜新词时只输出 click→type，从不清空旧词，
+                    #     搜索框里变成「旧词新词」，搜出来的结果当然错。
+                    if (
+                        action.type == "type"
+                        and self._pending_input_role in _SINGLE_LINE_INPUT_ROLES
+                        and not (
+                            action.args.get("replace")
+                            or action.args.get("clear")
+                            or action.args.get("clear_first")
+                        )
+                    ):
+                        action.args["replace"] = True
+                        log.info(
+                            "上一步聚焦的是单行输入框（%s），本次输入改为「全选覆盖」"
+                            "（避免拼接到旧内容后面）",
+                            self._pending_input_role,
+                        )
+                        self._emit(
+                            {
+                                "type": "debug",
+                                "step": step,
+                                "message": "输入前自动全选：覆盖输入框里的旧内容",
+                            }
+                        )
+
                     # 6. act：执行动作
                     self._emit(
                         {
@@ -677,6 +714,7 @@ class AgentLoop:
                         and _is_input_like(clicked_el)
                     ):
                         self._pending_input = clicked_el.label()
+                        self._pending_input_role = str(getattr(clicked_el, "role", "") or "")
                         result_desc += "（输入框已聚焦：下一步必须用 type 输入文字）"
                         log.info(
                             "点击了输入框「%s」：下一轮必须输出 type 输入文字",
@@ -684,6 +722,7 @@ class AgentLoop:
                         )
                     elif action.type == "type":
                         self._pending_input = None
+                        self._pending_input_role = ""
 
                     # 7. verify：校验屏幕变化
                     screen_changed = True
@@ -1102,19 +1141,33 @@ class AgentLoop:
         """
         if not self._pending_input:
             return ""
+        replace_note_zh = ""
+        replace_note_en = ""
+        if self._pending_input_role in _SINGLE_LINE_INPUT_ROLES:
+            replace_note_zh = (
+                "\n这是**单行**输入框（搜索框/地址栏这类）：直接 type 你要的新内容即可，"
+                "系统会**自动全选覆盖**框里的旧内容，不要自己再输出 cmd+a / backspace 去删。"
+            )
+            replace_note_en = (
+                "\nThis is a SINGLE-LINE field (search box / address bar): just `type` the new "
+                "text — the old content is selected and replaced automatically. Do NOT emit "
+                "cmd+a / backspace beforehand."
+            )
         return self._t(
             f"【系统提示】你上一步已经点击了输入框「{self._pending_input}」，"
             f"但**现在还没有输入任何文字**。输入框只需点一次，它已经聚焦了。\n"
             f'下一步**必须**输出：{{"type": "type", "text": "你要输入的内容"}}，'
             f"把文字打进去（`type` 不需要坐标或编号，直接输到当前焦点）。\n"
             f'输入完成后，如果需要提交，再输出 {{"type": "key", "key": "enter"}}。\n'
-            f"**绝对不要再次点击这个输入框**——那不会输入任何东西。",
+            f"**绝对不要再次点击这个输入框**——那不会输入任何东西。"
+            + replace_note_zh,
             f'[System note] You clicked the input field "{self._pending_input}" but have NOT typed '
             f"anything yet. The field only needs one click and it is already focused.\n"
             f'The next action MUST be {{"type": "type", "text": "the text to enter"}} '
             f"(`type` needs no coordinates or mark; it goes to the focused field).\n"
             f'When done, submit with {{"type": "key", "key": "enter"}} if needed.\n'
-            f"**Never click that input field again** — it types nothing.",
+            f"**Never click that input field again** — it types nothing."
+            + replace_note_en,
         )
 
     def _build_perception_warning(

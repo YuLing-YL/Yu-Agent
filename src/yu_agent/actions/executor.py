@@ -13,14 +13,26 @@
 """
 from __future__ import annotations
 
+import sys
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from ..common.errors import ActionError, SafetyViolation
 from ..common.logging import get_logger
 from .schema import Action
 
 log = get_logger("yu_agent.executor")
+
+def _truthy(v: Any) -> bool:
+    """把模型可能给出的 true / "true" / 1 / "yes" 都当成 True。"""
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    if isinstance(v, (int, float)):
+        return v != 0
+    return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+
 
 # 按键别名 -> pyautogui 合法键名
 _KEY_ALIASES = {
@@ -88,7 +100,14 @@ class ActionExecutor:
             elif t == "type":
                 if action.text is None:
                     raise ActionError("type 动作缺少 text 字段")
-                self._type_text(action.text)
+                self._type_text(
+                    action.text,
+                    replace=_truthy(
+                        action.args.get("replace")
+                        or action.args.get("clear")
+                        or action.args.get("clear_first")
+                    ),
+                )
             elif t == "key":
                 self._press_key(action.key)
             elif t == "scroll":
@@ -117,14 +136,31 @@ class ActionExecutor:
     # ------------------------------------------------------------------ #
     # 输入
     # ------------------------------------------------------------------ #
-    def _type_text(self, text: str) -> None:
-        """输入文字。非 ASCII（中文等）走剪贴板粘贴，pyautogui 打不出来。"""
+    def _type_text(self, text: str, replace: bool = False) -> None:
+        """输入文字。非 ASCII（中文等）走剪贴板粘贴，pyautogui 打不出来。
+
+        replace=True 时先 ⌘A 全选再输入，等于「替换框里的旧内容」而不是往里追加。
+        为什么要有这个开关：实测模型想搜索新词时，只会输出
+        `click 搜索框 → type 新词`，从不先删旧词，于是搜索框里变成
+        「旧词新词」拼在一起，搜出来的结果自然是错的。全选覆盖是搜索/地址栏
+        场景下正确的默认语义（见 agent/loop.py 里的自动判定）。
+        """
         if not text:
             return
+        if replace:
+            self._select_all()
         if _is_ascii(text):
             self.pg.write(text, interval=self.type_interval)
             return
         self._paste_text(text)
+
+    def _select_all(self) -> None:
+        """全选当前焦点控件里的内容（跨平台修饰键）。"""
+        mod = "command" if sys.platform == "darwin" else "ctrl"
+        self.pg.hotkey(mod, "a")
+        # 等应用把选区画出来；慢的 Electron 应用立刻输入会丢字
+        time.sleep(0.08)
+        log.info("输入前已全选（%s+A），本次输入将覆盖原有内容", mod)
 
     def _drag(self, action: Action) -> None:
         """拖拽。优先用绝对目标 (x2, y2)；也兼容相对位移 args.dx/dy。"""

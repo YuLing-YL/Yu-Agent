@@ -144,15 +144,134 @@ def test_show_dock_moves_to_edge() -> None:
 
 
 def test_prompts_have_both_paths() -> None:
-    """提示词里必须同时写清两条路，否则模型只会用其中一条。"""
+    """提示词里必须把三条路都写清，否则模型只会用其中一条。"""
     from yu_agent.prompts.loader import load_prompt
 
     for lang in ("en", "zh"):
         text = load_prompt("system", lang)
         assert "open_app" in text, f"{lang} 提示词缺少 open_app"
         assert "show_dock" in text, f"{lang} 提示词缺少 show_dock"
+        assert "spotlight_search" in text, f"{lang} 提示词缺少 spotlight_search"
         assert "Dock" in text or "程序坞" in text
-    print("✓ 中英文提示词都写了 open_app + show_dock 两条路")
+    print("✓ 中英文提示词都写了 open_app / spotlight_search / show_dock 三条路")
+
+
+# ── 应用查找：目录扫描 / mdfind / Spotlight ─────────────────────── #
+def test_scan_app_dirs_finds_bundle() -> None:
+    """open -a 认不出的名字，靠扫应用程序目录找 .app。"""
+    import os
+    import shutil
+
+    base = Path(__file__).resolve().parent / "_tmp_appdirs"
+    shutil.rmtree(base, ignore_errors=True)
+    try:
+        (base / "Safari.app").mkdir(parents=True)
+        (base / "Sub").mkdir()
+        (base / "Sub" / "Fancy App.app").mkdir()
+
+        orig_dirs = builtin._APP_DIRS
+        builtin._APP_DIRS = (str(base),)
+        try:
+            assert builtin._scan_app_dirs("safari").endswith("Safari.app")
+            # 空格/大小写不敏感 + 能进一层子目录
+            assert builtin._scan_app_dirs("fancyapp").endswith("Fancy App.app")
+            assert builtin._scan_app_dirs("不存在的应用") == ""
+        finally:
+            builtin._APP_DIRS = orig_dirs
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    print("✓ 目录扫描能定位 .app（含子目录、忽略空格大小写）")
+
+
+def test_open_app_falls_back_to_scanned_path() -> None:
+    """`open -a` 失败时，要用扫到的 .app 完整路径再打开一次。"""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        if cmd[:2] == ["open", "-a"]:
+            return FakeProc(1, stderr="Unable to find application")
+        if cmd[:1] == ["open"]:
+            return FakeProc(0)
+        return FakeProc(1)
+
+    orig = (builtin.subprocess.run, builtin._frontmost_app_name,
+            builtin.time.sleep, builtin._scan_app_dirs, builtin._mdfind_app)
+    builtin.subprocess.run = fake_run
+    builtin._frontmost_app_name = lambda: "Safari"
+    builtin.time.sleep = lambda *_: None
+    builtin._scan_app_dirs = lambda name: "/Applications/Safari.app"
+    builtin._mdfind_app = lambda name: ""
+    try:
+        out = _make_registry().call("open_app", app_name="Safari")
+    finally:
+        (builtin.subprocess.run, builtin._frontmost_app_name,
+         builtin.time.sleep, builtin._scan_app_dirs, builtin._mdfind_app) = orig
+
+    assert any(c[:1] == ["open"] and c[-1].endswith("Safari.app") for c in calls), calls
+    assert "已打开" in out, out
+    print("✓ open -a 失败后自动改用目录扫描到的 .app 路径")
+
+
+def test_open_app_uses_mdfind_as_last_resort() -> None:
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        if cmd[:1] == ["mdfind"]:
+            return FakeProc(0, stdout="/Applications/Weird.app\n")
+        if cmd[:2] == ["open", "-a"]:
+            return FakeProc(1)
+        if cmd[:1] == ["open"]:
+            return FakeProc(0)
+        return FakeProc(1)
+
+    orig = (builtin.subprocess.run, builtin._frontmost_app_name,
+            builtin.time.sleep, builtin._scan_app_dirs)
+    builtin.subprocess.run = fake_run
+    builtin._frontmost_app_name = lambda: "Weird"
+    builtin.time.sleep = lambda *_: None
+    builtin._scan_app_dirs = lambda name: ""          # 目录里找不到
+    try:
+        out = _make_registry().call("open_app", app_name="Weird")
+    finally:
+        (builtin.subprocess.run, builtin._frontmost_app_name,
+         builtin.time.sleep, builtin._scan_app_dirs) = orig
+
+    assert any(c[:1] == ["mdfind"] for c in calls), f"应调用 mdfind，实际 {calls}"
+    assert any(c[-1].endswith("Weird.app") for c in calls if c[:1] == ["open"]), calls
+    print("✓ 目录扫不到时用 mdfind 索引兜底")
+
+
+def test_spotlight_search_never_types_blind() -> None:
+    """Spotlight 没弹出来时绝不能敲键盘（会把字打进当前文档）。"""
+    keys = []
+
+    fake_pg = types.SimpleNamespace()
+    fake_pg.hotkey = lambda *k: keys.append(("hotkey", tuple(k)))
+    fake_pg.press = lambda k: keys.append(("press", k))
+
+    orig = (sys.modules.get("pyautogui"), builtin._spotlight_visible,
+            builtin.time.sleep, builtin._frontmost_app_name)
+    sys.modules["pyautogui"] = fake_pg
+    builtin._spotlight_visible = lambda: False
+    builtin.time.sleep = lambda *_: None
+    builtin._frontmost_app_name = lambda: "Code"
+    try:
+        out = _make_registry().call("spotlight_search", app_name="剪映")
+    finally:
+        pg, vis, slp, fr = orig
+        if pg is not None:
+            sys.modules["pyautogui"] = pg
+        else:
+            sys.modules.pop("pyautogui", None)
+        builtin._spotlight_visible, builtin.time.sleep, builtin._frontmost_app_name = vis, slp, fr
+
+    assert ("press", "escape") in keys, f"应取消，实际 {keys}"
+    assert not any(c[0] == "hotkey" and "v" in c[1] for c in keys), \
+        f"不能粘贴任何文字，实际 {keys}"
+    assert "没有输入" in out or "没有输入任何字符" in out, out
+    print("✓ Spotlight 没弹出时不盲打，直接 Esc 并说明原因")
 
 
 if __name__ == "__main__":
@@ -164,4 +283,8 @@ if __name__ == "__main__":
     test_open_app_empty_name()
     test_show_dock_moves_to_edge()
     test_prompts_have_both_paths()
+    test_scan_app_dirs_finds_bundle()
+    test_open_app_falls_back_to_scanned_path()
+    test_open_app_uses_mdfind_as_last_resort()
+    test_spotlight_search_never_types_blind()
     print("\nALL PASS")

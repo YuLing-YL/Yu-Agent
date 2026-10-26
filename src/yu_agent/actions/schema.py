@@ -35,7 +35,8 @@ SUPPORTED_ACTIONS = {
     "middle_click": "在 (x, y) 中键单击（常用于后台新标签页打开链接）",
     "triple_click": "在 (x, y) 三击（选中整行/整段文字）",
     "type": "输入文字：把 text 打到「当前已聚焦的输入框」里。**输入文字必须先 click 点一下输入框，"
-            "然后下一步用 type**；type 不需要坐标或编号，也不要点第二次输入框。支持中文。",
+            "然后下一步用 type**；type 不需要坐标或编号，也不要点第二次输入框。支持中文。"
+            "框里已有旧内容时不用管，系统会自动全选覆盖；想强制覆盖可加 \"replace\": true。",
     "key": "按下按键/组合键，key 形如 'enter'（提交搜索）、'esc'、'tab'、'cmd+l'（浏览器地址栏）、"
            "'cmd+c'、'cmd+v'。修饰键请写 cmd / ctrl / option / shift。",
     "scroll": "滚动，x/y 为位置，text 填 'up'/'down' 或数值",
@@ -56,7 +57,8 @@ SUPPORTED_ACTIONS_EN = {
     "triple_click": "triple click at (x, y) (select a whole line/paragraph)",
     "type": "type `text` into the currently focused field. You MUST click the field first, "
             "then use `type` on the next step; `type` needs no coordinates or mark. "
-            "Non-ASCII text (Chinese, emoji) is supported.",
+            "Non-ASCII text (Chinese, emoji) is supported. Old content in a single-line field "
+            "is replaced automatically; add \"replace\": true to force it.",
     "key": "press a key or shortcut, e.g. 'enter' (submit), 'esc', 'tab', 'cmd+l' (address bar), "
            "'cmd+c', 'cmd+v'. Modifiers: cmd / ctrl / option / shift.",
     "scroll": "scroll; x/y optional position, text is 'up'/'down' or an amount",

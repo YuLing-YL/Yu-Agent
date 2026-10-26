@@ -65,16 +65,148 @@ def _names_match(a: str, b: str) -> bool:
     return _APP_ALIASES.get(a, "").lower() == b or _APP_ALIASES.get(b, "").lower() == a
 
 
+# 应用常见的安装位置。Spotlight 索引被关掉时 mdfind 查不到，
+# 但「就在应用程序文件夹里」的情况占绝大多数，直接扫目录最快也最稳。
+_APP_DIRS = (
+    "/Applications",
+    "/Applications/Utilities",
+    "/System/Applications",
+    "/System/Applications/Utilities",
+    "~/Applications",
+)
+
+
+def _scan_app_dirs(name: str) -> str:
+    """在应用程序目录里按名字找 .app，返回完整路径（找不到返回空串）。
+
+    匹配规则：去掉空格和大小写后相同 > 包含。先比精确再比包含，
+    避免「Music」误命中「Music Converter」这类。
+    """
+    import os
+
+    key = name.strip().lower().replace(" ", "")
+    if not key:
+        return ""
+    exact: list[str] = []
+    loose: list[str] = []
+
+    def _collect(dirpath: str, depth: int = 0) -> None:
+        try:
+            entries = sorted(os.listdir(dirpath))
+        except OSError:
+            return
+        for entry in entries[:400]:            # 目录项太多时别死磕
+            full = os.path.join(dirpath, entry)
+            if entry.endswith(".app"):
+                stem = entry[:-4].lower().replace(" ", "")
+                if stem == key:
+                    exact.append(full)
+                elif key in stem or stem in key:
+                    loose.append(full)
+            elif depth == 0 and os.path.isdir(full) and not entry.startswith("."):
+                # 再往下看一层：/Applications/Adobe xxx/Photoshop.app 这种
+                _collect(full, depth=1)
+
+    for d in _APP_DIRS:
+        _collect(os.path.expanduser(d))
+    if exact:
+        return exact[0]
+    if loose:
+        # 挑路径最短的：/Applications/Xxx.app 比深处某个重名 bundle 更像正主
+        return sorted(loose, key=len)[0]
+    return ""
+
+
+def _mdfind_app(name: str) -> str:
+    """用 Spotlight 索引找 .app 的完整路径（目录扫描失败时的兜底）。
+
+    纯命令行、零副作用，不需要抢焦点 —— 比用 cmd+space 敲 Spotlight 稳得多。
+    """
+    queries = (
+        f'kMDItemContentType == "com.apple.application-bundle" && '
+        f'kMDItemDisplayName == "{name.strip()}*"c',
+        f'kMDItemContentType == "com.apple.application-bundle" && '
+        f'kMDItemFSName == "{name.strip()}.app"c',
+    )
+    for q in queries:
+        try:
+            r = subprocess.run(
+                ["mdfind", q], capture_output=True, text=True, timeout=8
+            )
+        except Exception:
+            continue
+        paths = [
+            p.strip() for p in (r.stdout or "").splitlines()
+            if p.strip().endswith(".app") and "/.Trash/" not in p
+        ]
+        if paths:
+            # /Applications 下的优先
+            paths.sort(key=lambda p: (0 if p.startswith("/Applications") else 1, len(p)))
+            return paths[0]
+    return ""
+
+
+def _paste_text(text: str) -> bool:
+    """用剪贴板 + ⌘V 输入（用于 Spotlight 这类只能靠键盘的输入框）。"""
+    try:
+        import pyautogui
+    except Exception:
+        return False
+    old = None
+    try:
+        import AppKit
+
+        pb = AppKit.NSPasteboard.generalPasteboard()
+        old = pb.stringForType_(AppKit.NSPasteboardTypeString)
+        pb.clearContents()
+        pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
+        pyautogui.hotkey("command", "v")
+        return True
+    except Exception:
+        return False
+    finally:
+        if old is not None:
+            try:
+                import AppKit
+
+                pb = AppKit.NSPasteboard.generalPasteboard()
+                pb.clearContents()
+                pb.setString_forType_(old, AppKit.NSPasteboardTypeString)
+            except Exception:
+                pass
+
+
+def _spotlight_visible() -> bool:
+    """Spotlight 搜索框是否真的弹出来了（防止盲敲键盘把字打进文档里）。"""
+    try:
+        import Quartz
+
+        info = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID
+        )
+    except Exception:
+        return False
+    for w in info:
+        owner = str(w.get("kCGWindowOwnerName") or "")
+        if owner in ("Spotlight", "SpotlightNetworking"):
+            b = w.get("kCGWindowBounds") or {}
+            if float(b.get("Width", 0)) > 100:
+                return True
+    return False
+
+
 def build_default_registry() -> SkillRegistry:
     """构建包含内置技能的注册表。"""
     reg = SkillRegistry()
 
     @reg.register(
         "open_app",
-        "打开/切换到指定应用（macOS 用 open -a，支持英文名与常见中文名）。"
-        "**打开应用优先用它，不要去找 Dock 图标**——Dock 可能被隐藏或图标太多点不准",
+        "打开/切换到指定应用。内部依次尝试 open -a 应用名 → 扫应用程序目录 → "
+        "Spotlight 索引(mdfind) → AppleScript，支持中文名与非标准安装位置。"
+        "**屏幕上找不到目标应用时优先用它，不要去找 Dock 图标**——"
+        "Dock 可能被隐藏或图标太多点不准",
         params={"app_name": "应用名称，如 'Safari'、'微信'、'文本编辑'"},
-        returns="真实结果：说明是否打开成功，并给出当前前台应用名",
+        returns="真实结果：说明是否打开成功（含用了哪种方式），并给出当前前台应用名",
     )
     def open_app(app_name: str) -> str:
         raw = (app_name or "").strip()
@@ -87,27 +219,70 @@ def build_default_registry() -> SkillRegistry:
 
         last_err = ""
         opened = False
+        how = ""
+
+        def _bundle_id_of(path: str) -> str:
+            """从 .app 路径读 bundle id（`open -b` 比 `open 路径` 更容易激活已运行的实例）。"""
+            try:
+                import plistlib
+                import os
+
+                with open(os.path.join(path, "Contents", "Info.plist"), "rb") as f:
+                    return str(plistlib.load(f).get("CFBundleIdentifier") or "")
+            except Exception:
+                return ""
+
         for name in candidates:
+            # ① 最常见的路：open -a 应用名
             try:
                 r = subprocess.run(
                     ["open", "-a", name], capture_output=True, text=True, timeout=15
                 )
                 if r.returncode == 0:
-                    opened = True
+                    opened, how = True, "open -a"
                     break
                 last_err = (r.stderr or r.stdout or "").strip()[:120]
             except Exception as e:
                 last_err = str(e)[:120]
 
+            # ② 扫应用程序目录找到 .app 再 open 路径
+            #    （`open -a` 认不出的名字、中文名、非标准安装位置都靠这一级）
+            path = _scan_app_dirs(name)
+            if path:
+                try:
+                    r = subprocess.run(
+                        ["open", path], capture_output=True, text=True, timeout=20
+                    )
+                    if r.returncode == 0:
+                        opened, how = True, f"目录扫描 {path}"
+                        break
+                except Exception as e:
+                    last_err = str(e)[:120]
+
+            # ③ Spotlight 索引（mdfind）兜底 —— 纯命令行，不需要抢焦点
+            path = _mdfind_app(name)
+            if path:
+                try:
+                    r = subprocess.run(
+                        ["open", path], capture_output=True, text=True, timeout=20
+                    )
+                    if r.returncode == 0:
+                        opened, how = True, f"mdfind {path}"
+                        break
+                except Exception as e:
+                    last_err = str(e)[:120]
+
         if not opened:
-            # 最后一招：AppleScript activate（对某些老应用有效）
+            # ④ 最后一招：AppleScript activate（对某些老应用有效）
             try:
                 r = subprocess.run(
                     ["osascript", "-e", f'tell application "{target}" to activate'],
                     capture_output=True, text=True, timeout=10,
                 )
                 opened = r.returncode == 0
-                if not opened:
+                if opened:
+                    how = "AppleScript activate"
+                else:
                     last_err = (r.stderr or "").strip()[:120] or last_err
             except Exception as e:
                 last_err = last_err or str(e)[:120]
@@ -116,7 +291,7 @@ def build_default_registry() -> SkillRegistry:
         time.sleep(1.2)
         front = _frontmost_app_name()
 
-        if front and _names_match(target, front):
+        if front and (_names_match(target, front) or _names_match(raw, front)):
             return f"已打开「{raw}」并切到前台（当前前台：{front}）"
 
         if opened:
@@ -126,7 +301,7 @@ def build_default_registry() -> SkillRegistry:
             # 所以下一步往往能直接在它上面操作。这里给模型一个"先看截图"的指引，
             # 而不是一上来就绕道 show_dock。
             return (
-                f"已启动/激活「{raw}」，但系统没允许后台进程把它切到前台"
+                f"已启动/激活「{raw}」（方式：{how}），但系统没允许后台进程把它切到前台"
                 f"（当前前台仍是「{front or '未知'}」）。\n"
                 f"**下一步先看截图**：如果它的按钮/输入框出现在编号表里，直接在它上面操作，"
                 f"点一下就会真正聚焦；如果被别的窗口盖住看不到，再调用 show_dock "
@@ -135,9 +310,10 @@ def build_default_registry() -> SkillRegistry:
 
         hint = f"：{last_err}" if last_err else ""
         return (
-            f"打开「{raw}」失败{hint}。\n"
-            f"可以改用英文名重试（Safari / TextEdit / Terminal / Finder / System Settings），"
-            f"或者调用 show_dock 唤醒程序坞后点它的图标。"
+            f"打开「{raw}」失败{hint}。"
+            f"已经试过：open -a、扫应用程序目录、Spotlight 索引（mdfind）、AppleScript。\n"
+            f"还有两条路：① 换成英文名/官方名重试（Safari / TextEdit / Terminal / Finder）；"
+            f"② 调用 spotlight_search（键盘搜索应用名），或用 show_dock 唤醒程序坞点图标。"
         )
 
     @reg.register(
@@ -235,5 +411,60 @@ def build_default_registry() -> SkillRegistry:
     def wait(seconds: float = 1.0) -> str:
         time.sleep(min(float(seconds), 30.0))
         return f"已等待 {seconds} 秒"
+
+    @reg.register(
+        "spotlight_search",
+        "用 Spotlight（⌘+空格）搜索并打开应用。"
+        "open_app 的所有方式都失败、或应用不在应用程序目录里时用它",
+        params={"app_name": "要搜索的应用名（中英文都可以）"},
+        returns="搜索结果，说明是否打开成功以及当前前台应用",
+    )
+    def spotlight_search(app_name: str = "") -> str:
+        """键盘唤起 Spotlight 搜应用名并回车。
+
+        ⚠️ 这一步会真的敲键盘，所以必须**先确认 Spotlight 窗口真的弹出来了**
+        （`_spotlight_visible()`），否则按下的字符会打进当前应用里
+        —— 那可能把用户的文档改坏，比什么都不做糟得多。
+        """
+        name = (app_name or "").strip()
+        if not name:
+            return "搜索失败：应用名是空的"
+        try:
+            import pyautogui
+        except Exception as e:
+            return f"搜索失败：pyautogui 不可用（{e}）"
+
+        before = _frontmost_app_name()
+        pyautogui.hotkey("command", "space")
+        time.sleep(0.8)
+
+        if not _spotlight_visible():
+            pyautogui.press("escape")
+            return (
+                "Spotlight 没有弹出来（可能被系统快捷键改动或权限限制），已按 Esc 取消，"
+                "没有输入任何字符。请改用 show_dock 唤醒程序坞点图标。"
+            )
+
+        # Spotlight 会记住上次的输入，先全选清掉，免得变成「旧词新词」
+        pyautogui.hotkey("command", "a")
+        time.sleep(0.1)
+        if not _paste_text(name):
+            pyautogui.press("escape")
+            return "搜索失败：无法写入剪贴板，已按 Esc 取消，没有输入任何字符。"
+
+        time.sleep(1.2)
+        pyautogui.press("enter")
+        time.sleep(2.5)
+
+        front = _frontmost_app_name()
+        if front and front != before and (_names_match(name, front) or not before):
+            return f"已通过 Spotlight 打开「{name}」（当前前台：{front}）"
+        if front and _names_match(name, front):
+            return f"已通过 Spotlight 切换到「{name}」（当前前台：{front}）"
+        return (
+            f"已在 Spotlight 里搜索「{name}」并回车，但前台变为了「{front or '未知'}」"
+            f"（搜索前是「{before or '未知'}」）。"
+            f"请**看截图确认**：应用是否已经打开/在最上层。没打开就 show_dock 点图标。"
+        )
 
     return reg
