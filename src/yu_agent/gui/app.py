@@ -449,6 +449,19 @@ class MainWindow(QMainWindow):
             )
         elif etype == "result":
             self.log_view.appendPlainText(f"[{ts}]   -> {event.get('result')}")
+        elif etype == "memory":
+            # 任务结束时长期记忆提炼了什么 —— 让人能直接看到"它记住了什么"
+            how = "模型总结" if event.get("used_llm") else "模板总结"
+            summary = event.get("summary") or ""
+            self.log_view.appendPlainText(f"[{ts}] [记忆/{how}] {summary}")
+            lesson = event.get("lesson") or ""
+            if lesson:
+                self.log_view.appendPlainText(f"           经验：{lesson}")
+            steps = event.get("steps") or []
+            if steps:
+                self.log_view.appendPlainText(
+                    "           可复用步骤：" + " → ".join(str(s) for s in steps[:6])
+                )
         elif etype == "step_detail":
             self._on_step_detail(event, ts)
         elif etype == "paused":

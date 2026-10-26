@@ -75,6 +75,29 @@ def _quantize(v: Optional[int]) -> Optional[int]:
     return int(round(float(v) / _COORD_GRID))
 
 
+def _describe_screen(a11y_stats: Dict[str, Any], en: bool = False) -> str:
+    """一句话说清"操作之前屏幕长什么样"（写进工作记忆）。
+
+    只保留对下一步有用的信息：哪个应用在前、一共多少个可点元素。
+    具体元素名会随截图变化，写多了反而让模型拿旧信息做判断。
+    """
+    apps = a11y_stats.get("apps") or []
+    if not apps:
+        return ""
+    first = apps[0] or {}
+    name = str(first.get("name") or "")
+    total = sum(int(a.get("elements") or 0) for a in apps)
+    if not name:
+        return ""
+    if en:
+        if len(apps) > 1:
+            return f"{name} +{len(apps) - 1} more app(s), {total} clickable elements"
+        return f"{name}, {total} clickable elements"
+    if len(apps) > 1:
+        return f"{name} 等 {len(apps)} 个应用，{total} 个可点元素"
+    return f"{name}，{total} 个可点元素"
+
+
 def _dist_to_rect(x: float, y: float, el: Any) -> float:
     """点到元素矩形的距离（点在矩形内部算 0）。"""
     dx = max(el.x - x, 0.0, x - (el.x + el.w))
@@ -438,10 +461,15 @@ class AgentLoop:
 
                     # 2. recall：召回记忆上下文（隔离为不可信内容）
                     mem_ctx = sanitize_context(
-                        self.memory.recall_context(task), self.prompt_lang
+                        self.memory.recall_context(task, self.prompt_lang),
+                        self.prompt_lang,
                     )
                     work_ctx = sanitize_context(
-                        self.memory.working.context_for_prompt(self.prompt_lang),
+                        # include_plan=False：子任务计划由 _build_subtask_hint 单独强调，
+                        # 这里只说"我做过什么"，两处都写会白占 token 还容易不一致
+                        self.memory.working.context_for_prompt(
+                            self.prompt_lang, include_plan=False
+                        ),
                         self.prompt_lang,
                     )
 
@@ -746,18 +774,33 @@ class AgentLoop:
                             no_change_count = 0
 
                     # 8. 记录记忆 + 历史
+                    #    这里写的是**人话**：模型下一轮要能看懂"我上一步点了什么、
+                    #    屏幕上发生了什么"。以前记的是 "执行click / click(513,127)"，
+                    #    既没说是哪个元素，也没说生效没有，等于白记。
+                    step_action = self._describe_step_action(action, marks_map)
+                    step_screen = _describe_screen(
+                        a11y_stats, en=str(self.prompt_lang).lower().startswith("en")
+                    )
+                    if not screen_changed and action.type not in (
+                        "done", "finish", "plan", "wait", "subtask_done",
+                    ):
+                        step_effect = "no_change"
+                    elif result_desc.startswith("执行失败") or "失败" in result_desc[:8]:
+                        step_effect = "failed"
+                    else:
+                        step_effect = "changed"
                     self.memory.add_step(
                         step=step,
-                        observation_summary=f"执行{action.type}",
-                        action=f"{action.type}" + (
-                            f"({action.x},{action.y})" if action.x is not None else ""
-                        ),
+                        observation_summary=step_screen,
+                        action=step_action,
                         result=result_desc,
+                        effect=step_effect,
                     )
                     self.state.history.append(
                         {
                             "step": step,
                             "action": action.type,
+                            "action_desc": step_action,
                             "reason": action.reason,
                             "result": result_desc,
                         }
@@ -887,8 +930,34 @@ class AgentLoop:
             # 用户主动停止且未成功完成时，给出明确原因
             if self._user_stopped and not self.state.success:
                 self.state.reason = self.state.reason or "任务已被用户停止"
-            # 蒸馏长期记忆
-            self.memory.finish_task(task, self.state.history, self.state.success)
+            # 蒸馏长期记忆：把这一次的轨迹提炼成 summary / lesson / 可复用步骤。
+            # dry-run 没有真实轨迹，用模板总结即可（省一次模型调用）。
+            summarized: Dict[str, Any] = {}
+            try:
+                summarized = self.memory.finish_task(
+                    task,
+                    self.state.history,
+                    self.state.success,
+                    summarize=None if self.dry_run else self._llm_summarize,
+                    language=self.prompt_lang,
+                )
+            except Exception as e:      # 记忆写入失败绝不影响任务结果
+                log.warning("长期记忆蒸馏失败（不影响任务）：%s", e)
+            if summarized:
+                log.info(
+                    "长期记忆已更新（%s）：%s",
+                    "模型总结" if summarized.get("used_llm") else "模板总结",
+                    summarized.get("summary", ""),
+                )
+                self._emit(
+                    {
+                        "type": "memory",
+                        "summary": summarized.get("summary", ""),
+                        "lesson": summarized.get("lesson", ""),
+                        "steps": summarized.get("steps", []),
+                        "used_llm": summarized.get("used_llm", False),
+                    }
+                )
             self._emit(
                 {
                     "type": "finish",
@@ -1038,6 +1107,74 @@ class AgentLoop:
                 )
             )
         return "\n\n".join(parts)
+
+    # ------------------------------------------------------------------ #
+    # 记忆
+    # ------------------------------------------------------------------ #
+    def _describe_step_action(self, action: Action, marks_map=None) -> str:
+        """把动作翻译成一句人话（写进工作记忆，下一轮喂回给模型）。
+
+        为什么要翻译：`click(513,127)` 这种记录模型下一轮根本认不出来，
+        它需要的是「我点了搜索框」——才能判断"这个动作已经做过了"。
+        """
+        en = str(self.prompt_lang).lower().startswith("en")
+        t = action.type
+
+        if t in _CLICK_TYPES:
+            el = marks_map.get(action.mark) if (marks_map and action.mark is not None) else None
+            name = str(getattr(el, "title", "") or "") if el is not None else ""
+            if en:
+                verb = {
+                    "click": "clicked", "double_click": "double-clicked",
+                    "right_click": "right-clicked", "middle_click": "middle-clicked",
+                    "triple_click": "triple-clicked",
+                }.get(t, "clicked")
+                if name:
+                    return f'{verb} "{name}"'
+                if action.mark is not None:
+                    return f"{verb} an unlabeled element"
+                return f"{verb} ({action.x},{action.y})"
+            verb = {
+                "click": "点击", "double_click": "双击", "right_click": "右键点击",
+                "middle_click": "中键点击", "triple_click": "三击",
+            }.get(t, "点击")
+            if name:
+                return f"{verb}「{name}」"
+            if action.mark is not None:
+                return f"{verb}了一个无标签元素"
+            return f"{verb} ({action.x},{action.y})"
+
+        if t == "type":
+            txt = (action.text or "")[:24]
+            return f'typed "{txt}"' if en else f"输入「{txt}」"
+        if t == "key":
+            return f"pressed {action.key}" if en else f"按了 {action.key}"
+        if t == "scroll":
+            return f"scrolled {action.text or ''}".strip() if en else f"滚动 {action.text or ''}".strip()
+        if t == "skill":
+            return f"called skill {action.skill}" if en else f"调用技能 {action.skill}"
+        if t == "drag":
+            return "dragged" if en else "拖拽"
+        if t == "wait":
+            return "waited" if en else "等待"
+        if t in ("done", "finish", "subtask_done"):
+            return "finished" if en else "结束任务"
+        return t
+
+    def _llm_summarize(self, system: str, user: str) -> str:
+        """给记忆蒸馏用的纯文本总结（不附图，固定低温，短输出）。"""
+        from ..models.base import VLMRequest
+
+        resp = self.backend.chat(
+            VLMRequest(
+                system=system,
+                prompt=user,
+                images=[],
+                temperature=0.2,
+                max_tokens=400,
+            )
+        )
+        return str(resp.text or "")
 
     def _snap_to_mark(
         self,

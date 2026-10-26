@@ -13,9 +13,13 @@ class ProceduralMemory:
     def __init__(self, store: MemoryStore):
         self.store = store
 
-    def remember(self, name: str, steps: List[str], app: str = "") -> int:
-        content = "\n".join(f"{i+1}. {s}" for i, s in enumerate(steps))
-        entry = MemoryEntry(kind="procedural", content=f"技能[{name}]:\n{content}", app=app)
+    def remember(self, name: str, steps: List[str], app: str = "",
+                 dedupe: bool = False) -> int:
+        content = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
+        text = f"技能[{name}]:\n{content}"
+        if dedupe and self.store.exists("procedural", text):
+            return 0
+        entry = MemoryEntry(kind="procedural", content=text, app=app)
         return self.store.add(entry)
 
     def recall(self, query: str, limit: int = 3) -> List[MemoryEntry]:

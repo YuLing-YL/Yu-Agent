@@ -1,7 +1,7 @@
 """记忆系统统一入口。"""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .distillation import MemoryDistiller
 from .episodic import EpisodicMemory
@@ -41,6 +41,7 @@ class MemoryManager:
         observation_summary: str,
         action: str,
         result: str,
+        effect: str = "",
         screenshot_b64: Optional[str] = None,
     ) -> None:
         self.working.add_step(
@@ -49,6 +50,7 @@ class MemoryManager:
                 observation_summary=observation_summary,
                 action=action,
                 result=result,
+                effect=effect,
                 screenshot_b64=screenshot_b64,
             )
         )
@@ -70,11 +72,14 @@ class MemoryManager:
         self.profile.set_preference(key, value)
 
     # ---- 检索 ----
-    def recall_context(self, task: str) -> str:
+    def recall_context(self, task: str, language: str = "") -> str:
         """召回长期记忆，作为 prompt 注入。"""
         if not self.enabled:
             return ""
-        return self.retriever.context_for_prompt(task)
+        try:
+            return self.retriever.context_for_prompt(task, language=language)
+        except Exception:
+            return ""
 
     def profile_context(self) -> str:
         if not self.enabled:
@@ -82,9 +87,44 @@ class MemoryManager:
         return self.profile.describe()
 
     # ---- 蒸馏 ----
-    def finish_task(self, task: str, steps: List[Dict[str, Any]], success: bool) -> None:
-        if self.enabled:
-            self.distiller.distill(task, steps, success)
+    def finish_task(
+        self,
+        task: str,
+        steps: List[Dict[str, Any]],
+        success: bool,
+        summarize: Optional[Callable[[str, str], str]] = None,
+        language: str = "",
+    ) -> Dict[str, Any]:
+        """任务结束时把轨迹提炼进长期记忆。
+
+        summarize(system, user) -> text：可选的模型总结函数（由 AgentLoop 提供）。
+        返回 {summary, lesson, steps, used_llm}，供 GUI/日志展示「记住了什么」。
+        """
+        if not self.enabled:
+            return {}
+        try:
+            return self.distiller.distill(
+                task, steps, success, summarize=summarize, language=language
+            )
+        except Exception:
+            # 记忆写失败绝不能影响任务结果
+            return {}
+
+    def memory_view(self, limit: int = 20) -> Dict[str, List[Dict[str, Any]]]:
+        """按类型列出最近的长期记忆（CLI/GUI 查看用）。"""
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        for kind in ("episodic", "semantic", "procedural", "profile"):
+            rows = self.store.recent(kind=kind, limit=limit)
+            out[kind] = [
+                {
+                    "id": e.id,
+                    "content": e.content,
+                    "created_at": e.created_at,
+                    "success": (e.metadata or {}).get("success", 1),
+                }
+                for e in rows
+            ]
+        return out
 
     def close(self) -> None:
         self.store.close()

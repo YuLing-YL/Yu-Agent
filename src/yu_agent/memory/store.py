@@ -98,6 +98,28 @@ class MemoryStore:
         rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_entry(r) for r in rows]
 
+    def exists(self, kind: str, content: str) -> bool:
+        """同样内容的记忆是否已经存在（去重用，避免同一句经验存十遍）。"""
+        row = self._conn.execute(
+            "SELECT 1 FROM memories WHERE kind = ? AND content = ? LIMIT 1",
+            (kind, content),
+        ).fetchone()
+        return row is not None
+
+    def touch(self, kind: str, content: str) -> int:
+        """同内容记录的时间戳刷成"现在"，返回其 id（去重时用）。"""
+        row = self._conn.execute(
+            "SELECT id FROM memories WHERE kind = ? AND content = ? LIMIT 1",
+            (kind, content),
+        ).fetchone()
+        if row is None:
+            return 0
+        self._conn.execute(
+            "UPDATE memories SET created_at = ? WHERE id = ?", (time.time(), row["id"])
+        )
+        self._conn.commit()
+        return int(row["id"])
+
     def delete_kind(self, kind: str) -> None:
         self._conn.execute("DELETE FROM memories WHERE kind = ?", (kind,))
         self._conn.commit()

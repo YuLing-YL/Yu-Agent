@@ -50,6 +50,13 @@ def main(argv=None) -> int:
         help="关闭「用截图像素校准元素框」（框会更贴合 AX 原始矩形，用于对比效果）",
     )
 
+    # memory：查看 / 清空长期记忆
+    p_mem = sub.add_parser("memory", help="查看或清空长期记忆（跨任务沉淀的经验）")
+    p_mem.add_argument("-n", type=int, default=10, help="每类显示最近多少条（默认 10）")
+    p_mem.add_argument("--kind", default="", help="只看某一类：episodic/semantic/procedural")
+    p_mem.add_argument("--clear", action="store_true", help="清空长期记忆（需再确认）")
+    p_mem.add_argument("--yes", action="store_true", help="配合 --clear，跳过确认")
+
     # logs：查看日志文件位置 / 末尾内容
     p_log = sub.add_parser("logs", help="显示日志文件路径（或末尾若干行）")
     p_log.add_argument("-n", type=int, default=0, help="显示末尾 n 行（默认只显示路径）")
@@ -70,6 +77,8 @@ def main(argv=None) -> int:
         return _screenshot(args)
     if args.command == "perceive":
         return _perceive(args)
+    if args.command == "memory":
+        return _memory(args)
     if args.command == "logs":
         return _logs(args)
     if args.command == "doctor":
@@ -250,6 +259,63 @@ def _format_marks(mapping) -> list:
             f"   中心≈({int(el.cx)},{int(el.cy)}) 尺寸={int(el.w)}x{int(el.h)}"
         )
     return lines
+
+
+def _memory(args) -> int:
+    """查看 / 清空长期记忆。
+
+    长期记忆是任务结束后自动提炼的（summary / 经验 / 可复用步骤），
+    这里让人能直接看到"它到底记住了什么"，也方便在记错时清掉重来。
+    """
+    from .memory import MemoryManager
+
+    m = MemoryManager()
+    try:
+        if args.clear:
+            if not args.yes:
+                ans = input("确认清空全部长期记忆？输入 yes 继续：").strip().lower()
+                if ans not in ("yes", "y"):
+                    print("已取消，没有删除任何东西。")
+                    return 0
+            m.store.clear()
+            print("长期记忆已清空。")
+            return 0
+
+        view = m.memory_view(limit=max(1, args.n))
+        kinds = ["episodic", "semantic", "procedural", "profile"]
+        if args.kind:
+            kinds = [args.kind] if args.kind in view else []
+            if not kinds:
+                print(f"未知类型：{args.kind}（可选：episodic / semantic / procedural / profile）")
+                return 1
+
+        labels = {
+            "episodic": "情节记忆（每次任务做了什么）",
+            "semantic": "语义记忆（跨任务的经验/注意事项）",
+            "procedural": "程序记忆（可复用的操作步骤）",
+            "profile": "画像（用户偏好）",
+        }
+        total = 0
+        for kind in kinds:
+            rows = view.get(kind) or []
+            total += len(rows)
+            print(f"\n── {labels.get(kind, kind)}：{len(rows)} 条")
+            if not rows:
+                continue
+            for r in rows:
+                import datetime
+
+                ts = datetime.datetime.fromtimestamp(r["created_at"]).strftime("%m-%d %H:%M")
+                flag = "" if r.get("success", 1) else "  ⚠️失败"
+                body = " ".join(str(r["content"]).split())
+                print(f"  [{ts}] #{r['id']}{flag} {body[:150]}")
+        if total == 0:
+            print("\n（还没有长期记忆。跑完一个任务后会自动生成。）")
+        else:
+            print(f"\n共 {total} 条。清空用：python -m yu_agent memory --clear")
+        return 0
+    finally:
+        m.close()
 
 
 def _logs(args) -> int:

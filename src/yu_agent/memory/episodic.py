@@ -13,7 +13,18 @@ class EpisodicMemory:
     def __init__(self, store: MemoryStore):
         self.store = store
 
-    def record(self, task: str, content: str, app: str = "", success: bool = True) -> int:
+    def record(self, task: str, content: str, app: str = "", success: bool = True,
+               dedupe: bool = False) -> int:
+        """记一条「这次任务发生了什么」。
+
+        dedupe=True：完全相同的内容不再插入新行，只把时间戳刷成现在。
+        同一件任务反复跑（评测、重试）时，否则会存下几十条一模一样的记录，
+        召回时全是重复噪声。
+        """
+        if dedupe:
+            hit = self.store.touch("episodic", content)
+            if hit:
+                return hit
         entry = MemoryEntry(
             kind="episodic",
             content=content,

@@ -19,6 +19,7 @@
 | `python -m yu_agent run "任务"` | 命令行执行一个 GUI 任务 | 需要 |
 | `python -m yu_agent test "任务"` | 离线测试完整闭环（mock 后端） | 不需要 |
 | `python -m yu_agent perceive` | **感知自检**：截屏 + 列出识别到的可点元素 | 不需要 |
+| `python -m yu_agent memory` | **查看长期记忆**（它到底记住了什么） | 不需要 |
 | `python -m yu_agent logs -n 50` | 查看日志文件路径 / 末尾内容 | 不需要 |
 | `python -m yu_agent screenshot` | 截屏保存到文件 | 不需要 |
 | `python -m yu_agent doctor` | 检查环境依赖 | 不需要 |
@@ -101,6 +102,24 @@ python -m yu_agent screenshot -o /tmp/screen.png
 ```bash
 python -m yu_agent doctor
 ```
+
+### 5.5 查看长期记忆（它到底记住了什么）
+
+```bash
+python -m yu_agent memory                 # 每类最近 10 条
+python -m yu_agent memory -n 30           # 多看一些
+python -m yu_agent memory --kind semantic # 只看「经验/注意事项」
+python -m yu_agent memory --clear         # 清空（会再确认一次）
+```
+
+记忆分四类：
+
+| 类型 | 内容 | 何时写入 |
+| --- | --- | --- |
+| 情节 `episodic` | 这次任务做了什么、成没成 | 任务结束（成功/失败都写） |
+| 语义 `semantic` | 下次要注意的一条经验 | 任务结束，且模型确实提炼出了东西 |
+| 程序 `procedural` | 可复用的操作步骤 | **仅成功**任务，避免把失败路径当模板 |
+| 画像 `profile` | 用户偏好 | 手动设置 |
 
 ### 6. 感知自检（排查「找不到输入框 / 点不准 / 漏元素」的首选）
 
