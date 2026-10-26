@@ -72,6 +72,15 @@ class MemoryManager:
         self.profile.set_preference(key, value)
 
     # ---- 检索 ----
+    def suggest_procedure(self, task: str) -> List[str]:
+        """上次做成同类任务时的步骤（只作参考，不自动执行）。"""
+        if not self.enabled:
+            return []
+        try:
+            return self.procedural.best_steps(task)
+        except Exception:
+            return []
+
     def recall_context(self, task: str, language: str = "") -> str:
         """召回长期记忆，作为 prompt 注入。"""
         if not self.enabled:

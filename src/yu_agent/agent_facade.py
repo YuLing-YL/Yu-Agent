@@ -26,6 +26,7 @@ class YuAgent:
         callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         memory: Optional[MemoryManager] = None,
         backend=None,
+        control=None,
     ):
         setup_logging()
 
@@ -78,9 +79,19 @@ class YuAgent:
                 "max_no_change_steps": settings.agent.max_no_change_steps,
                 "max_plan_rejects": settings.agent.max_plan_rejects,
                 "type_interval_s": settings.agent.type_interval_s,
+                # 结果复核 / 重规划 / 成本单价（都可在 config 里关掉或调）
+                "verify_goal": settings.loop.get("verify_goal", True),
+                "max_goal_rejects": settings.loop.get("max_goal_rejects", 1),
+                "max_replans": settings.loop.get("max_replans", 1),
+                "ocr_anchor": settings.loop.get("ocr_anchor", True),
+                "require_approval_for_risky": settings.loop.get(
+                    "require_approval_for_risky", True
+                ),
+                "model_pricing": settings.loop.get("model_pricing") or {},
             },
             dry_run=dry_run,
             callback=callback,
+            control=control,
         )
 
     def run(self, task: str):
@@ -89,6 +100,12 @@ class YuAgent:
 
     def stop(self) -> None:
         self.loop.stop()
+
+    def pause(self) -> None:
+        self.loop.pause()
+
+    def resume(self) -> None:
+        self.loop.resume()
 
     def close(self) -> None:
         self.memory.close()

@@ -16,6 +16,10 @@ class AgentState:
     success: bool = False
     reason: str = ""  # 结束原因
     auto_stopped: bool = False  # 是否因重复/卡死被系统自动停止
+    # 结果复核：True=截图上确认完成 / False=模型说完成但复核没过 / None=无法验证
+    verified: Optional[bool] = None
+    verify_reason: str = ""
+    usage: Dict[str, Any] = field(default_factory=dict)   # token/成本统计
     history: List[Dict[str, Any]] = field(default_factory=list)
     subtasks: List[str] = field(default_factory=list)
     current_subtask: int = 0
@@ -29,6 +33,9 @@ class AgentState:
             "success": self.success,
             "reason": self.reason,
             "auto_stopped": self.auto_stopped,
+            "verified": self.verified,
+            "verify_reason": self.verify_reason,
+            "usage": self.usage,
             "subtasks": self.subtasks,
             "current_subtask": self.current_subtask,
         }

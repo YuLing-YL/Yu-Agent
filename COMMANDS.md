@@ -245,6 +245,99 @@ cat runs/<时间戳>/trace.jsonl | python -m json.tool --json-lines
 
 再打开对应的 `step_XX.png`，对照就能看出模型看的是不是你以为的那张图。
 
+## 结果复核 / 危险动作确认 / 暂停 / 成本
+
+### 1. 结果复核（模型说完成后自动验收）
+
+模型输出 `done` 之后，系统会**另起一次调用**，只给它「任务 + 做过的步骤 + 当前截图」，
+让它判断结果是否**真的出现在屏幕上**。
+
+- 复核通过 → 正常结束，`state.verified = True`
+- 复核不通过 → **不结束**，把「还差什么」写进下一轮提示，打回继续做
+- 打回到上限（默认 1 次）仍不通过 → 如实标成失败：`success=False`，reason 写「复核未通过」
+
+CLI 结束时多打一行：
+
+```
+结果：success=True，步骤=6，原因=已打开结果页
+复核：通过（截图上确认已完成）
+用量：8 次模型调用 / 24310 tokens / 模型耗时 41.2s
+```
+
+配置（`config/default.yaml → loop`）：
+
+| 键 | 默认 | 作用 |
+| --- | --- | --- |
+| `verify_goal` | `true` | 关掉就退回「模型说完成就算完成」（不推荐） |
+| `max_goal_rejects` | `1` | 复核不通过时打回几次 |
+
+想排除干扰排查问题时，把它关掉对比：
+
+```bash
+# 临时关掉复核（不推荐长期这样）
+python - <<'PY'
+import yaml, pathlib
+p = pathlib.Path("data/config/user.yaml")
+d = yaml.safe_load(p.read_text()) or {}
+d.setdefault("loop", {})["verify_goal"] = False
+p.write_text(yaml.safe_dump(d, allow_unicode=True, sort_keys=False))
+PY
+```
+
+### 2. 危险动作确认
+
+按**被点元素上的文字**判风险，不按坐标（同一个坐标在不同界面完全不同）：
+
+| 级别 | 触发例 | 无人可问时 |
+| --- | --- | --- |
+| critical | 删除 / 移到废纸篓 / 格式化 / 卸载 / 支付 / 转账 / 下单 / 发送 / 发布 | **拦下**，不执行 |
+| high | 覆盖 / 清空 / 重置 / 退出未保存 | 放行并记日志 |
+
+- GUI：弹窗「即将执行：click「删除」…」，选「执行 / 跳过」，5 分钟不选按拒绝处理
+- CLI（交互式终端）：终端里 `y/N`
+- 误伤保护：「删除线」「清除格式」这类编辑动作不拦
+
+关闭确认（不建议）：`loop.require_approval_for_risky: false`。
+
+### 3. 暂停 / 继续
+
+GUI 主窗口的「暂停」：当前这一步做完后停住，不会打断正在进行的点击；
+按钮变成「继续」，点一下从原处恢复。CLI 用 `Ctrl+Z` 挂起进程（系统级）。
+
+### 4. 成本
+
+任务结束会统计：调用次数、输入/输出 token、模型累计耗时，按角色（决策/复核/记忆）分列。
+配置单价后才折算金额（`loop.model_pricing`）：
+
+```yaml
+loop:
+  model_pricing:
+    input_per_1k: 0.00015    # 每 1K 输入 token 的美元单价
+    output_per_1k: 0.0006
+```
+
+### 5. 屏幕上没有的元素怎么点（OCR 兜底）
+
+Electron / Canvas / 图片按钮在 AX 里根本不存在，这时：
+
+- 模型给坐标 → 程序用 OCR 把 `reason` 里提到的文字在屏幕上找出来，**离给的坐标不远才采纳**
+  （默认 320px，配置 `loop.ocr_anchor` 可关）
+- 想主动用：技能 `click_text("发送")`、`read_screen_text()`、`ocr_status()`
+
+排查 OCR：
+
+```bash
+python - <<'PY'
+import sys; sys.path.insert(0,'src')
+from yu_agent.skills import build_default_registry
+print(build_default_registry().call("ocr_status"))
+PY
+```
+
+要求 macOS 的 pyobjc-framework-Vision（已在 `macos` 依赖组里）。
+
+---
+
 ## 安装依赖
 
 ```bash

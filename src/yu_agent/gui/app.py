@@ -22,7 +22,9 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QInputDialog,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -101,6 +103,16 @@ class MainWindow(QMainWindow):
         self.next_btn.setToolTip("单步模式下，放行下一步（每步执行完会自动暂停）")
         self.next_btn.clicked.connect(self._next_step)
         row1.addWidget(self.next_btn, 0, Qt.AlignTop)
+
+        self.pause_btn = QPushButton("暂停")
+        self.pause_btn.setMinimumSize(80, 32)
+        self.pause_btn.setEnabled(False)
+        self.pause_btn.setToolTip(
+            "暂停：当前这一步做完后停住，不会再开始新的点击；\n"
+            "再点一次「继续」从暂停处恢复。要立刻中止请用「停止」"
+        )
+        self.pause_btn.clicked.connect(self._toggle_pause)
+        row1.addWidget(self.pause_btn, 0, Qt.AlignTop)
 
         self.stop_btn = QPushButton("停止")
         self.stop_btn.setObjectName("stopButton")
@@ -336,6 +348,9 @@ class MainWindow(QMainWindow):
         self._worker.event.connect(self._on_event)
         self._worker.reply.connect(self._on_reply)
         self._worker.finished.connect(self._on_finished)
+        # 人机往返：危险动作确认 / agent 提问（worker 线程阻塞等这两个弹窗）
+        self._worker.approval_needed.connect(self._on_approval_needed)
+        self._worker.question_asked.connect(self._on_question_asked)
 
         # 清空上一轮的面板
         self.log_view.clear()
@@ -351,6 +366,8 @@ class MainWindow(QMainWindow):
 
         self.run_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
+        self.pause_btn.setEnabled(True)
+        self.pause_btn.setText("暂停")
         self.next_btn.setEnabled(False)
         self.status.setText("运行中…" + ("（单步）" if self.step_cb.isChecked() else ""))
 
@@ -471,6 +488,28 @@ class MainWindow(QMainWindow):
             self.status.setText(f"已暂停：第 {step} 步执行完毕，点「下一步」继续")
             self.log_view.appendPlainText(f"[{ts}] [暂停] 第 {step} 步完成，等待下一步")
             self.floating.update_status(f"已暂停（第 {step} 步）", step=step)
+        elif etype == "verify":
+            ok = event.get("ok")
+            if ok is True:
+                tag = "✅ 复核通过"
+            elif ok is False:
+                tag = "❌ 复核未通过"
+            else:
+                tag = "⚠️ 未能复核"
+            reason = event.get("reason") or ""
+            self.log_view.appendPlainText(f"[{ts}] [复核] {tag}：{reason}")
+        elif etype == "stats":
+            line = event.get("line") or ""
+            self.log_view.appendPlainText(f"[{ts}] [用量] {line}")
+        elif etype == "run_paused":
+            self.pause_btn.setText("继续")
+            self.status.setText(f"已暂停（第 {event.get('step')} 步之后）")
+            self.log_view.appendPlainText(f"[{ts}] [暂停] 已停住，点「继续」恢复")
+            self.floating.update_status("已暂停")
+        elif etype == "run_resumed":
+            self.pause_btn.setText("暂停")
+            self.status.setText("已继续")
+            self.log_view.appendPlainText(f"[{ts}] [继续] 从暂停处恢复")
         elif etype == "debug":
             self.log_view.appendPlainText(f"[{ts}] {event.get('message')}")
         elif etype == "notice":
@@ -534,6 +573,58 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         self._apply_pixmap()
 
+    # ---- 人机往返 ----
+    def _toggle_pause(self) -> None:
+        """暂停/继续（不打断正在进行的点击）。"""
+        if not (self._worker and self._worker.isRunning()):
+            return
+        if str(self.pause_btn.text()) == "暂停":
+            self._worker.pause()
+        else:
+            self._worker.resume()
+
+    def _on_approval_needed(self, info: dict) -> None:
+        """危险动作确认：删除/发送/支付这类不可逆操作必须人来点头。"""
+        desc = info.get("description", "")
+        level = info.get("level", "high")
+        category = info.get("category", "")
+        detail = info.get("detail", "")
+        box = QMessageBox(self)
+        box.setWindowTitle("需要确认")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(f"即将执行：{desc}")
+        box.setInformativeText(
+            f"风险等级：{level}（{category}）\n"
+            f"命中：{detail}\n\n"
+            f"这类操作不可逆，确认继续吗？"
+        )
+        yes = box.addButton("执行", QMessageBox.AcceptRole)
+        box.addButton("跳过", QMessageBox.RejectRole)
+        box.exec()
+        ok = box.clickedButton() is yes
+        self.log_view.appendPlainText(
+            f"[{time.strftime('%H:%M:%S')}] [确认] {desc} → {'执行' if ok else '跳过'}"
+        )
+        if self._worker:
+            self._worker.provide_approval(ok)
+
+    def _on_question_asked(self, info: dict) -> None:
+        """agent 主动提问：给它一个回答框，别让它瞎猜。"""
+        question = info.get("question", "需要补充信息")
+        options = info.get("options") or []
+        if options:
+            text, ok = QInputDialog.getItem(
+                self, "agent 提问", question, [str(o) for o in options], 0, True
+            )
+        else:
+            text, ok = QInputDialog.getText(self, "agent 提问", question)
+        answer = str(text).strip() if ok else ""
+        self.log_view.appendPlainText(
+            f"[{time.strftime('%H:%M:%S')}] [提问] {question} → {answer or '（未回答）'}"
+        )
+        if self._worker:
+            self._worker.provide_answer(answer)
+
     def _on_finished(self, state: dict) -> None:
         ts = time.strftime("%H:%M:%S")
         success = state.get("success", False)
@@ -561,8 +652,30 @@ class MainWindow(QMainWindow):
             self.status.setText(f"未完成：{short}")
             self.floating.mark_finished(False, short)
 
+        # 复核结论与用量：这两项是「这次到底做成了没有、花了多少」的唯一凭据
+        verified = state.get("verified")
+        if verified is False:
+            self.log_view.appendPlainText(
+                f"[{ts}] [复核] 模型声称完成，但截图复核未通过：{state.get('verify_reason', '')}"
+            )
+        elif verified is None and not state.get("skipped"):
+            self.log_view.appendPlainText(f"[{ts}] [复核] 本次未能复核（不影响任务结果）")
+        usage = state.get("usage") or {}
+        if usage.get("calls"):
+            cost = usage.get("cost_usd")
+            tail = f"，约 ${cost}" if cost is not None else ""
+            self.log_view.appendPlainText(
+                f"[{ts}] [用量] {usage['calls']} 次调用 / "
+                f"{usage.get('total_tokens', 0)} tokens / "
+                f"模型耗时 {usage.get('llm_latency_s', 0)}s{tail}"
+            )
+        self.status.setText(self.status.text() + f"（{usage.get('total_tokens', 0)} tokens）"
+                            if usage.get("total_tokens") else self.status.text())
+
         self.run_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
+        self.pause_btn.setEnabled(False)
+        self.pause_btn.setText("暂停")
         self.next_btn.setEnabled(False)
         self._paused = False
 

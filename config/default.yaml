@@ -41,6 +41,16 @@ loop:
   verify_after_action: true  # 动作后是否校验屏幕是否变化
   verify_delay_s: 0.5        # 动作后等待多久再截图对比（太快会把慢渲染误判为无变化）
   screenshot_diff_threshold: 0.002   # 变化像素占比低于此值视为「没反应」
+  # ── 结果复核：模型说 done 之后，另起一次调用对着截图确认「真的完成了吗」──
+  verify_goal: true          # 关掉就退回「模型说完成就算完成」（不推荐）
+  max_goal_rejects: 1        # 复核说没完成时打回重做几次（打回时会告诉模型还差什么）
+  # ── 卡住时的重规划（plan 平时只接受一次，这是唯一例外出口）──
+  max_replans: 1
+  # ── OCR 坐标兜底：AX 里没有的元素，用屏幕文字反查位置（约 0.3s/次，仅兜底时触发）──
+  ocr_anchor: true
+  require_approval_for_risky: true   # 删除/发送/支付这类动作是否要人工确认
+  # 模型单价（每 1K token，美元）；留空则只统计 token 不折算金额
+  model_pricing: {}
 
 perception:
   screenshot_format: png

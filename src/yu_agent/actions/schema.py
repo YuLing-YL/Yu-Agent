@@ -44,6 +44,9 @@ SUPPORTED_ACTIONS = {
     "drag": "拖拽：从 (x, y) 拖到 (x2, y2)（绝对坐标，推荐）；也可用 args.dx/dy 表示相对位移",
     "wait": "等待 duration 秒",
     "skill": "调用已注册技能，skill 填技能名，args 填参数",
+    "ask": "向用户提问（信息不足时用，不要瞎猜）：text 填问题，args.options 可选，"
+           "如 \"args\": {\"options\": [\"账号A\", \"账号B\"]}。会等待用户回答后继续；"
+           "无人接管时会提示你自行决定，所以只在真的缺信息时用",
     "subtask_done": "当前子任务已完成，reason 说明；用于推进到下一个子任务",
     "done": "整个任务已完成，reason 说明结果",
 }
@@ -67,6 +70,9 @@ SUPPORTED_ACTIONS_EN = {
             "relative args.dx/dy also works",
     "wait": "wait for `duration` seconds",
     "skill": "call a registered skill; put its name in `skill` and arguments in `args`",
+    "ask": "ask the user a question when information is missing (do not guess): put the "
+           "question in `text`, optional `args.options` list. The run waits for the answer; "
+           "if nobody is attending you will be told to decide yourself",
     "subtask_done": "current subtask finished; `reason` explains what was done",
     "done": "the whole task is finished; `reason` explains the result",
 }

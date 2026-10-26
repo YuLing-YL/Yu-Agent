@@ -11,7 +11,9 @@ FORBIDDEN_ACTIONS = {"run_shell", "shell", "exec", "rm", "delete_file"}
 
 # 疑似提示词注入的特征（屏幕/记忆/上下文里出现这些，说明可能被污染）
 _INJECTION_PATTERNS = [
-    r"忽略(之前|以上|上述|所有)?(的)?(指令|提示|规则|约束)",
+    # 中间常插「的所有」「掉」「前面的」，放宽一点，否则真实注入文案认不出来
+    r"忽略[^。；;\n]{0,10}(指令|提示|规则|约束|要求|设定)",
+    r"(不要|别)(再)?(遵守|执行|理会)[^。；;\n]{0,8}(指令|提示|规则)",
     r"ignore\s+(previous|all|the above)\s+(instructions|prompts|rules)",
     r"忘记(你的)?(角色|身份|规则|指令)",
     r"你现在是",

@@ -149,6 +149,9 @@ class Planner:
 
         resp = self.backend.chat(req)
         self.last_raw_text = resp.text or ""
+        # 供上层计量（一次任务花了多少 token / 多少钱）
+        self.last_usage = getattr(resp, "usage", None)
+        self.last_latency_s = float(getattr(resp, "latency_s", 0.0) or 0.0)
         if not resp.text:
             raise ModelError("模型返回了空内容")
 

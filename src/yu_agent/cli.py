@@ -95,10 +95,15 @@ def main(argv=None) -> int:
 
 
 def _run(args) -> int:
+    import sys
+
+    from .agent.control import interactive
     from .agent_facade import YuAgent
     from .settings import get_settings
 
-    agent = YuAgent(dry_run=args.dry_run)
+    # 交互式终端才接人工审批/问答；管道/CI 里自动降级为无人值守
+    control = interactive() if sys.stdin.isatty() else None
+    agent = YuAgent(dry_run=args.dry_run, control=control)
     # 本次运行的标注模式（命令行优先于配置）
     mode = getattr(args, "som_mode", None)
     if mode:
@@ -110,6 +115,19 @@ def _run(args) -> int:
         print("本次标注所有可见应用（不再只标当前窗口）")
     state = agent.run(args.task)
     print(f"\n结果：success={state.success}，步骤={state.step}，原因={state.reason}")
+    if state.verified is False:
+        print(f"复核：未通过 —— {state.verify_reason}")
+    elif state.verified is True:
+        print("复核：通过（截图上确认已完成）")
+    else:
+        print(f"复核：未验证{f'（{state.verify_reason}）' if state.verify_reason else ''}")
+    if state.usage:
+        u = state.usage
+        cost = f"，约 ${u['cost_usd']}" if "cost_usd" in u else ""
+        print(
+            f"用量：{u.get('calls', 0)} 次调用 / {u.get('total_tokens', 0)} tokens"
+            f" / 模型耗时 {u.get('llm_latency_s', 0)}s{cost}"
+        )
     agent.close()
     return 0 if state.success else 1
 

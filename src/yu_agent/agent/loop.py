@@ -42,9 +42,15 @@ from ..perception.screenshot import capture_screen, get_screen_size, region_to_p
 from ..perception.som import MarkStabilizer, build_som_mapping, describe_marks
 from ..prompts.loader import prompt_language
 from ..safety.policy import check_action_allowed, detect_injection, sanitize_context
+from .anchor import ocr_anchor
+from .control import RunControl
+from .finish_gate import FinishGate
+from .guard import ActionGuard, summarize_texts
+from .verify import GoalVerifier, Verdict
 from ..skills.registry import SkillRegistry
 from .planner import Planner
 from .state import AgentState
+from .usage import UsageMeter
 
 log = get_logger("yu_agent.loop")
 
@@ -266,6 +272,7 @@ class AgentLoop:
         config: Optional[Dict[str, Any]] = None,
         dry_run: bool = False,
         callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        control: Optional[RunControl] = None,
     ):
         self.backend = backend
         self.memory = memory
@@ -273,6 +280,12 @@ class AgentLoop:
         self.cfg = config or {}
         self.dry_run = dry_run
         self.callback = callback  # 用于 GUI 实时反馈
+        # 人机交互通道：暂停/继续、问用户、危险动作审批（GUI/CLI 各自注入）
+        self.control = control or RunControl()
+        self._guard = ActionGuard(
+            self.control,
+            require_approval=bool(self.cfg.get("require_approval_for_risky", True)),
+        )
 
         # type_interval_s：纯 ASCII 逐字输入的间隔（中文走剪贴板，不受影响）
         self.executor = ActionExecutor(
@@ -337,6 +350,27 @@ class AgentLoop:
         # 提示词语言（en/zh）：决定系统提示词与运行期提示用哪种语言
         self.prompt_lang = str(self.cfg.get("prompt_language") or "").strip() or prompt_language()
         self._user_stopped = False
+        # ── 结果自校验 ──
+        # 模型说 done 之后，另起一次调用对着截图复核「是不是真做完了」。
+        # 复核说没完成 → 打回让它接着做（最多 max_goal_rejects 次），
+        # 而不是把「点过按钮」当成「做成了」。
+        self.verify_goal = bool(self.cfg.get("verify_goal", True))
+        self.max_goal_rejects = int(self.cfg.get("max_goal_rejects", 1))
+        self._verifier = GoalVerifier(backend, self.prompt_lang)
+        # OCR 坐标兜底：只在「模型直接给坐标且附近没有元素」时触发（约 0.3s/次）
+        self.ocr_anchor_enabled = bool(self.cfg.get("ocr_anchor", True))
+        self._gate: Optional[FinishGate] = None   # 每个任务重建（state 会重置）
+        # 调用计量：每类调用分开记，任务结束汇总（没有数字就无法做取舍）
+        pricing = (self.cfg.get("model_pricing") or {}) if isinstance(self.cfg, dict) else {}
+        self.usage = UsageMeter(
+            price_in=pricing.get("input_per_1k"),
+            price_out=pricing.get("output_per_1k"),
+        )
+        self._answer_hint = ""      # 用户回答注入下一轮 prompt
+        self._injection_hint = ""   # 屏幕注入告警（每任务只提示一次）
+        # 卡住时允许**一次**重新规划（plan 平时只接受一次，这里是唯一的例外出口）
+        self.max_replans = int(self.cfg.get("max_replans", 1))
+        self._replans = 0
 
     def _t(self, zh: str, en: str) -> str:
         """运行期提示按提示词语言二选一。"""
@@ -348,9 +382,28 @@ class AgentLoop:
     def run(self, task: str) -> AgentState:
         """执行一个任务，直到完成、被用户停止、或触发任一安全阈值。"""
         self.state = AgentState(task=task, running=True)
+        # 收尾闸门按任务重建：它持有 rejects 计数与打回提示，不能跨任务沿用
+        self._gate = FinishGate(
+            check_fn=self._check_goal,
+            state=self.state,
+            emit=self._emit,
+            translate=self._t,
+            max_rejects=self.max_goal_rejects,
+            dry_run=self.dry_run,
+            logger=log,
+        )
         self.memory.start_task(task)
+        # 上次做成同类任务时的步骤 → 作为初始计划（不是硬编码脚本，可随时偏离）
+        self._plan_from_memory = False
+        self._load_remembered_plan(task)
         self._user_stopped = False
         self._pending_input = None
+        self._answer_hint = ""
+        self._injection_hint = ""
+        self._replans = 0
+        self.usage = UsageMeter(
+            price_in=self.usage.price_in, price_out=self.usage.price_out
+        )
         # 每任务重来一套编号（同一任务内编号保持稳定，跨任务不需要延续）
         self._mark_stab.reset()
         low = task.lower()
@@ -381,6 +434,8 @@ class AgentLoop:
 
         try:
             while self.state.running and self.state.step < self.max_steps:
+                # 暂停：停在这一步之前；用户点「停止」时立刻退出等待
+                self.control.wait_while_paused(lambda: self._user_stopped)
                 # 用户已点停止 → 立刻退出，绝不开始新的一步
                 if self._user_stopped:
                     break
@@ -457,6 +512,22 @@ class AgentLoop:
                             log.warning("SOM 标记失败，回退到像素坐标：%s", e)
                             marks_map = {}
 
+                    # 2.2 提示词注入扫描：屏幕上的文字是不可信输入，
+                    #     界面里写「忽略之前的指令」时模型不该照做
+                    if not self._injection_hint and not self.dry_run:
+                        hit = self._guard.scan_injection(summarize_texts(marks_map))
+                        if hit:
+                            en = self.prompt_lang.lower().startswith("en")
+                            self._injection_hint = self._guard.injection_hint(hit, en=en)
+                            log.warning("检测到疑似提示词注入：%s", hit)
+                            self._emit(
+                                {
+                                    "type": "notice",
+                                    "step": step,
+                                    "message": f"屏幕上出现可疑指令文字「{hit[:40]}」，已按普通文字处理",
+                                }
+                            )
+
                     data_url = image_to_data_url(obs_img)
 
                     # 2. recall：召回记忆上下文（隔离为不可信内容）
@@ -475,13 +546,20 @@ class AgentLoop:
 
                     # 2.5 提示词组装（顺序 = 重要度递增，模型最后看到的最强）：
                     #     子任务计划 → 最近动作 → 输入提醒 → 感知异常
-                    hint_parts = [
+                    hint_parts = []
+                    if self._injection_hint:
+                        hint_parts.append(self._injection_hint)
+                    if self._answer_hint:
+                        hint_parts.append(self._answer_hint)
+                    hint_parts += [
                         self._build_subtask_hint(),
                         self._build_progress_hint(
                             recent, repeat_count, no_change_count
                         ),
                         self._build_input_hint(),
                     ]
+                    if self._gate is not None and self._gate.hint:
+                        hint_parts.append(self._gate.hint)
                     warn = self._build_perception_warning(a11y_stats, marks_map)
                     if warn:
                         hint_parts.append(warn)
@@ -507,10 +585,63 @@ class AgentLoop:
                         language=self.prompt_lang,
                     )
 
+                    self.usage.add(
+                        getattr(self.planner, "last_usage", None),
+                        getattr(self.planner, "last_latency_s", 0.0),
+                        role="planner",
+                    )
+
                     # 用户可能在模型思考期间点了停止 → 丢弃本步动作，不要执行
                     if self._user_stopped:
                         log.info("用户已停止，丢弃本步动作：%s", action.type)
                         break
+
+                    # 3.5 ask：模型需要用户补信息（选哪个账号/哪个文件/要不要覆盖…）
+                    #     不允许它瞎猜——猜错的代价往往比多问一句大得多。
+                    if action.type == "ask":
+                        question = (action.text or action.reason or "").strip() or "需要补充信息"
+                        options = action.args.get("options") or []
+                        answer = self.control.ask(question, options)
+                        if answer:
+                            self._answer_hint = self._t(
+                                f"【用户回答】针对你刚才的问题「{question[:80]}」，"
+                                f"用户回答：{answer[:200]}。请按这个回答继续，不要重复提问。",
+                                f"[User answer] For your question \"{question[:80]}\", "
+                                f"the user answered: {answer[:200]}. Continue with it; "
+                                f"do not ask the same question again.",
+                            )
+                            desc = f"已询问用户并得到回答：{answer[:60]}"
+                        else:
+                            self._answer_hint = self._t(
+                                "【系统】你上一步想向用户提问，但没有得到回答（当前无人接管）。"
+                                "请根据现有信息和屏幕内容自行做出最合理的决定，不要再重复提问。",
+                                "[System] Your question got no answer (nobody is attending). "
+                                "Decide yourself from the screen and the task; do not ask again.",
+                            )
+                            desc = "提问无人回答，改为自行决定"
+                        log.info("ask：%s → %s", question[:60], desc)
+                        self._emit({"type": "result", "step": step, "result": desc})
+                        self.memory.add_step(
+                            step=step,
+                            observation_summary=_describe_screen(
+                                a11y_stats, en=self.prompt_lang.lower().startswith("en")
+                            ),
+                            action=f"提问「{question[:40]}」",
+                            result=desc,
+                            effect="changed",
+                        )
+                        self.state.history.append(
+                            {
+                                "step": step,
+                                "action": "ask",
+                                "action_desc": f"提问「{question[:40]}」",
+                                "reason": action.reason,
+                                "result": desc,
+                            }
+                        )
+                        recent.append(f"步骤{step}: 提问 → {desc[:40]}")
+                        del recent[:-6]
+                        continue
 
                     # 4. 处理 plan（任务拆分）
                     #    ⚠️ 整个任务只接受一次拆分。曾经的 bug：plan 分支直接 continue，
@@ -541,6 +672,42 @@ class AgentLoop:
                                 result_desc=f"已拆分为 {len(subtasks)} 个子任务",
                             )
                             continue  # 不执行动作，下一轮开始执行第一个子任务
+
+                        # 4a2. 卡住了 → 允许重新拆分一次（原计划走不通时唯一的出路）。
+                        #      判定「卡住」用已有信号：连续重复动作 或 连续无变化。
+                        # 提前一格判定：_check_stuck 在本步结束时就会用
+                        # 「repeat_count >= max_repeats」直接停任务，
+                        # 等到了那个值再重规划已经来不及了。
+                        stuck = (
+                            repeat_count >= max(2, self.max_repeats - 1)
+                            or no_change_count >= max(1, self.max_stuck - 1)
+                        )
+                        if subtasks and stuck and self._replans < self.max_replans:
+                            self._replans += 1
+                            old_plan = list(self.state.subtasks)
+                            self.state.subtasks = subtasks
+                            self.state.current_subtask = 0
+                            self.memory.set_subtasks(subtasks)
+                            self._emit({"type": "plan", "subtasks": subtasks})
+                            msg = (
+                                f"原计划走不通，已按新思路重新规划"
+                                f"（第 {self._replans}/{self.max_replans} 次）："
+                                + " / ".join(subtasks)
+                            )
+                            log.warning(msg)
+                            self._emit({"type": "notice", "step": step, "message": msg})
+                            self.state.history.append(
+                                {
+                                    "step": step,
+                                    "action": "plan",
+                                    "action_desc": f"重新规划（原计划：{' / '.join(old_plan)}）",
+                                    "reason": action.reason,
+                                    "result": msg,
+                                }
+                            )
+                            recent.append(f"步骤{step}: 重新规划 → {' / '.join(subtasks)[:50]}")
+                            del recent[:-6]
+                            continue
 
                         # 4b. 不该再拆分的两种情况 → 忽略 + 计数 + 回灌纠正提示
                         plan_rejects += 1
@@ -586,19 +753,15 @@ class AgentLoop:
                         total = len(self.state.subtasks)
                         idx = self.state.current_subtask
                         if total == 0 or idx >= total - 1:
-                            # 没有子任务，或已是最后一个 → 整体任务完成
-                            self.state.done = True
-                            self.state.success = True
-                            self.state.reason = action.reason or "全部子任务已完成"
-                            self.state.running = False
-                            self._emit(
-                                {
-                                    "type": "result",
-                                    "step": step,
-                                    "result": f"✅ {self.state.reason}",
-                                }
-                            )
-                            break
+                            # 没有子任务，或已是最后一个 → 整体任务完成。
+                            # 但「完成」不能只信模型一句话：先对着截图复核一遍。
+                            if self._finish_if_verified(
+                                task,
+                                action.reason or "全部子任务已完成",
+                                obs_img, step, recent,
+                            ):
+                                break
+                            continue
                         # 推进到下一个子任务
                         self.state.current_subtask += 1
                         self.memory.working.current_subtask = self.state.current_subtask
@@ -665,6 +828,27 @@ class AgentLoop:
                             # 几何上没吸附到 → 退回语义锚定：按 reason 里说的名字反查
                             snap = _anchor_by_text(action, marks_map, action.x, action.y)
                             how = "语义锚定"
+                        if snap is None and action.type in _CLICK_TYPES and not self.dry_run:
+                            # AX 里根本没有这个元素（Electron/Canvas/图片按钮）→
+                            # 用 OCR 把「模型说它想点的文字」在屏幕上找出来
+                            ocr_hit = ocr_anchor(
+                                action.reason, before,
+                                near=(action.x, action.y),
+                                enabled=self.ocr_anchor_enabled,
+                            )
+                            if ocr_hit is not None:
+                                log.info(
+                                    "OCR 锚定：模型给的 (%d,%d) → 文字「%s」(%d,%d)",
+                                    action.x, action.y, ocr_hit.text, ocr_hit.x, ocr_hit.y,
+                                )
+                                self._emit(
+                                    {
+                                        "type": "debug",
+                                        "step": step,
+                                        "message": f"OCR 锚定到「{ocr_hit.text}」",
+                                    }
+                                )
+                                action.x, action.y = ocr_hit.x, ocr_hit.y
                         if snap is not None:
                             sx_, sy_, num, el = snap
                             clicked_el = el
@@ -679,6 +863,36 @@ class AgentLoop:
                                 "可能点偏；标记图见本次 runs 目录。",
                                 action.x, action.y,
                             )
+
+                    # 5.7 风险闸门：删除/发送/支付这类不可逆动作必须先问人。
+                    #     判断依据是「被点元素上的文字」——同一个坐标在不同界面
+                    #     完全不同，只有文字能说明它是不是「删除」。
+                    target_text = ""
+                    if clicked_el is not None:
+                        target_text = str(getattr(clicked_el, "title", "") or "")
+                    decision = self._guard.check(
+                        action.type, target_text=target_text, key=action.key or ""
+                    )
+                    if not decision.allow:
+                        log.warning("%s", decision.reason)
+                        self._emit(
+                            {"type": "notice", "step": step, "message": decision.reason}
+                        )
+                        blocked = f"未执行：{decision.reason}"
+                        self.memory.add_step(
+                            step=step,
+                            observation_summary=_describe_screen(
+                                a11y_stats, en=self.prompt_lang.lower().startswith("en")
+                            ),
+                            action=self._describe_step_action(action, marks_map),
+                            result=blocked,
+                            effect="failed",
+                        )
+                        recent.append(f"步骤{step}: {blocked[:50]}")
+                        del recent[:-6]
+                        continue
+                    if decision.risk is not None and decision.risk.needs_approval:
+                        log.info("高风险动作已确认：%s", decision.reason or decision.risk)
 
                     # 执行前最后一次确认用户是否已停止
                     if self._user_stopped:
@@ -806,6 +1020,14 @@ class AgentLoop:
                         }
                     )
 
+                    # 有实质进展 → 上一轮复核打回的意见已过期，别再干扰模型
+                    if (
+                        self._gate is not None
+                        and action.type not in ("done", "finish", "subtask_done", "plan")
+                        and step_effect != "failed"
+                    ):
+                        self._gate.clear_hint()
+
                     self._emit(
                         {"type": "result", "step": step, "result": result_desc}
                     )
@@ -852,13 +1074,13 @@ class AgentLoop:
                         }
                     )
 
-                    # 9. 判断是否结束（模型自己说完成）
+                    # 9. 判断是否结束（模型说完成 → 复核通过才真的收尾）
                     if action.is_done:
-                        self.state.done = True
-                        self.state.success = True
-                        self.state.reason = action.reason or "任务完成"
-                        self.state.running = False
-                        break
+                        if self._finish_if_verified(
+                            task, action.reason or "任务完成", obs_img, step, recent
+                        ):
+                            break
+                        continue
 
                     # 10. 目标统计 + 多层防重复 / 防卡死
                     sig = _action_target_sig(action)
@@ -969,6 +1191,10 @@ class AgentLoop:
                 }
             )
             log.info("任务结束：success=%s reason=%s", self.state.success, self.state.reason)
+            stats = self.usage.summary()
+            self.state.usage = stats
+            log.info("本次用量：%s", self.usage.one_line())
+            self._emit({"type": "stats", **stats, "line": self.usage.one_line()})
 
         return self.state
 
@@ -1176,6 +1402,66 @@ class AgentLoop:
         )
         return str(resp.text or "")
 
+    # ------------------------------------------------------------------ #
+    # 结果自校验
+    # ------------------------------------------------------------------ #
+    def _check_goal(
+        self, task: str, claim: str, obs_img, step: int
+    ) -> Verdict:
+        """对着「当前这张截图」复核任务是否真的完成。
+
+        用独立的一次调用（不带历史截图、温度 0），只看证据。失败一律返回
+        「未验证」——宁可标成未验证，也不要假装成功。
+        """
+        if not self.verify_goal:
+            return Verdict(None, "未开启结果复核", method="disabled")
+        if self.dry_run:
+            return Verdict(None, "dry-run 不复核", method="dry-run")
+        try:
+            data_url = image_to_data_url(scale_image(obs_img, self.max_image_side))
+        except Exception as e:
+            return Verdict(None, f"截图编码失败：{e}", method="error")
+
+        self._emit(
+            {
+                "type": "debug",
+                "step": step,
+                "message": f"复核「{claim[:40]}」：对照截图确认是否真的完成…",
+            }
+        )
+        verdict = self._verifier.verify(task, self.state.history, data_url)
+        self.usage.add(
+            getattr(self._verifier, "last_usage", None),
+            getattr(self._verifier, "last_latency_s", 0.0),
+            role="verify",
+        )
+        log.info(
+            "结果复核：%s（%s，置信度 %.2f）%s",
+            {True: "已完成", False: "未完成", None: "无法验证"}.get(verdict.ok),
+            verdict.method,
+            verdict.confidence,
+            f" — {verdict.reason}" if verdict.reason else "",
+        )
+        self._emit(
+            {
+                "type": "verify",
+                "step": step,
+                "ok": verdict.ok,
+                "reason": verdict.reason,
+                "method": verdict.method,
+                "confidence": verdict.confidence,
+            }
+        )
+        return verdict
+
+    def _finish_if_verified(
+        self, task: str, claim: str, obs_img, step: int, recent: List[str]
+    ) -> bool:
+        """模型声称完成时的统一出口（决策逻辑在 agent/finish_gate.py）。"""
+        assert self._gate is not None
+        result = self._gate.finish(task, claim, obs_img, step, recent)
+        return result.finished
+
     def _snap_to_mark(
         self,
         x: int,
@@ -1214,12 +1500,17 @@ class AgentLoop:
         if not subs:
             return ""
         idx = max(0, min(self.state.current_subtask, len(subs) - 1))
-        lines = [
-            self._t(
-                "【子任务计划（系统已确认，禁止再次拆分）】",
-                "[Subtask plan (confirmed by the system — do NOT decompose again)]",
+        header = self._t(
+            "【子任务计划（系统已确认，禁止再次拆分）】",
+            "[Subtask plan (confirmed by the system — do NOT decompose again)]",
+        )
+        if self._plan_from_memory:
+            header += self._t(
+                "（来自上次成功的做法，仅供参考：界面和上次不一样就自己换路）",
+                " (recalled from a previous success — for reference only; "
+                "deviate if the screen differs)",
             )
-        ]
+        lines = [header]
         for i, s in enumerate(subs):
             if i < idx:
                 mark = self._t("✅ 已完成", "DONE")
@@ -1455,6 +1746,50 @@ class AgentLoop:
     # ------------------------------------------------------------------ #
     # 单步调试
     # ------------------------------------------------------------------ #
+    def _load_remembered_plan(self, task: str) -> None:
+        """把上次成功任务的步骤读出来当初始计划。
+
+        只放在「还没有计划」的时候；读不到就什么都不做——绝不能因为记忆里
+        有条旧流程就打乱本次任务的正常规划。
+        """
+        if self.state.subtasks:
+            return
+        try:
+            steps = self.memory.suggest_procedure(task)
+        except Exception:
+            steps = []
+        if len(steps) < 2:
+            return
+        self.state.subtasks = steps
+        self.state.current_subtask = 0
+        self.memory.set_subtasks(steps)
+        self._plan_from_memory = True
+        log.info("复用上次成功的流程（%d 步）：%s", len(steps), " / ".join(steps))
+        self._emit({"type": "plan", "subtasks": steps, "source": "memory"})
+        self._emit(
+            {
+                "type": "notice",
+                "step": 0,
+                "message": "已参考上次成功的做法拆好步骤；界面不同会自动偏离",
+            }
+        )
+
+    def pause(self) -> None:
+        """暂停（当前这一步做完后停住，不会打断正在进行的点击）。"""
+        self.control.pause()
+        self._emit({"type": "run_paused", "step": self.state.step})
+        log.info("已暂停（第 %d 步之后停住）", self.state.step)
+
+    def resume(self) -> None:
+        """从暂停处继续。"""
+        self.control.resume()
+        self._emit({"type": "run_resumed", "step": self.state.step})
+        log.info("已继续")
+
+    @property
+    def paused(self) -> bool:
+        return self.control.paused
+
     def request_next_step(self) -> None:
         """单步调试：放行下一步（界面点「下一步」时调用）。"""
         self._step_gate.set()

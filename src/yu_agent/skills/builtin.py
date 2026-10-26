@@ -367,29 +367,6 @@ def build_default_registry() -> SkillRegistry:
         return f"已按下快捷键 {keys}"
 
     @reg.register(
-        "click_text",
-        "通过 OCR 找到屏幕上包含指定文字的位置并点击",
-        params={"text": "要查找并点击的文字", "ocr_lang": "OCR 语言，默认 eng"},
-    )
-    def click_text(text: str, ocr_lang: str = "eng") -> str:
-        # 简化实现：依赖 pytesseract；若未安装则报错提示
-        try:
-            import pytesseract
-            import pyautogui
-            from PIL import Image
-        except ImportError:
-            return "未安装 pytesseract，无法 OCR 定位文字。请改用坐标点击。"
-        img = pyautogui.screenshot()
-        data = pytesseract.image_to_data(img, lang=ocr_lang, output_type=pytesseract.Output.DICT)
-        for i, word in enumerate(data["text"]):
-            if text.lower() in word.lower():
-                x = data["left"][i] + data["width"][i] // 2
-                y = data["top"][i] + data["height"][i] // 2
-                pyautogui.click(x, y)
-                return f"已点击文字『{text}』所在位置 ({x}, {y})"
-        return f"未在屏幕上找到文字『{text}』"
-
-    @reg.register(
         "take_screenshot",
         "截取当前屏幕并保存到指定路径",
         params={"path": "保存路径（可选，默认 runs 目录）"},
@@ -466,5 +443,16 @@ def build_default_registry() -> SkillRegistry:
             f"（搜索前是「{before or '未知'}」）。"
             f"请**看截图确认**：应用是否已经打开/在最上层。没打开就 show_dock 点图标。"
         )
+
+    # ── 按领域拆分的技能模块 ────────────────────────────────────
+    # 技能越加越多，全塞在这个文件里会变成第二个 loop.py。
+    # 每个领域一个模块，各自暴露 register(reg)，这里只做组装。
+    from . import clipboard as clipboard_skills
+    from . import files as file_skills
+    from . import screen as screen_skills
+
+    screen_skills.register(reg)
+    file_skills.register(reg)
+    clipboard_skills.register(reg)
 
     return reg
