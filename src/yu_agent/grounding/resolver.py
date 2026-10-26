@@ -1,11 +1,11 @@
 """定位解析器：把模型动作解析并落地为可执行动作。"""
 from __future__ import annotations
 
-from typing import Any, List
+from typing import List
 
 from ..actions.schema import Action
 from ..common.errors import GroundingError
-from .parser import parse_action, parse_actions
+from .parser import parse_actions
 
 
 class GroundingResolver:

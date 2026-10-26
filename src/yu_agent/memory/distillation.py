@@ -20,10 +20,9 @@
 """
 from __future__ import annotations
 
-import json
-import re
 from typing import Any, Callable, Dict, List, Optional
 
+from ..common.jsonx import extract_json_object
 from .episodic import EpisodicMemory
 from .procedural import ProceduralMemory
 from .semantic import SemanticMemory
@@ -60,26 +59,13 @@ def _clip(s: Any, n: int) -> str:
 
 
 def _parse_json(text: str) -> Optional[Dict[str, Any]]:
-    """从模型输出里抠出 JSON（本地模型经常带前后废话或 ``` 包裹）。"""
+    """从模型输出里抠出 JSON（本地模型经常带前后废话或 ``` 包裹）。
+
+    统一走 common/jsonx，不再各自实现一份提取逻辑。
+    """
     if not text:
         return None
-    t = text.strip()
-    t = re.sub(r"^```(?:json)?|```$", "", t, flags=re.MULTILINE).strip()
-    try:
-        data = json.loads(t)
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        pass
-    m = re.search(r"\{.*\}", t, re.DOTALL)
-    if m:
-        try:
-            data = json.loads(m.group(0))
-            if isinstance(data, dict):
-                return data
-        except Exception:
-            pass
-    return None
+    return extract_json_object(text)
 
 
 class MemoryDistiller:

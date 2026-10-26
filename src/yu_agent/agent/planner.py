@@ -1,11 +1,11 @@
 """规划者：根据观察 + 记忆 + 上下文，决定下一步动作。"""
 from __future__ import annotations
 
-import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from ..actions.schema import Action, describe_actions
 from ..common.errors import GroundingError, ModelError
+from ..common.jsonx import extract_json_object
 from ..grounding.parser import _to_action
 from ..models.base import VLMRequest
 from ..prompts.loader import prompt_language, render_prompt
@@ -162,21 +162,15 @@ class Planner:
 
 
 def _parse_planner_output(text: str) -> Action:
-    """解析规划者输出，支持 plan 类型（带 subtasks）。"""
-    text = text.strip()
-    # 提取 JSON
-    data: Dict[str, Any]
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        # 尝试提取内嵌 JSON
-        import re
+    """解析规划者输出，支持 plan 类型（带 subtasks）。
 
-        m = re.search(r"\{[^{}]*\}", text, re.DOTALL)
-        if m:
-            data = json.loads(m.group(0))
-        else:
-            raise GroundingError(f"无法解析：{text[:200]}")
+    统一走 common/jsonx：这里原来自己写了一份 `\\{[^{}]*\\}` 正则，
+    遇到 `{"type":"skill","args":{...}}` 这种嵌套会先命中内层对象，
+    解析出一个空动作且**不报错**（模型答对了却被当成没答）。
+    """
+    data = extract_json_object(text, required_keys=["type", "action", "subtasks"])
+    if data is None:
+        raise GroundingError(f"无法解析：{(text or '')[:200]}")
 
     # plan 动作：含 subtasks 列表
     if data.get("type") == "plan" or "subtasks" in data:

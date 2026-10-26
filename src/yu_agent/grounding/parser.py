@@ -1,12 +1,14 @@
 """解析模型输出的动作（JSON 或纯文本）。"""
 from __future__ import annotations
 
-import json
-import re
 from typing import Any, Dict, List
 
 from ..actions.schema import Action
 from ..common.errors import GroundingError
+from ..common.jsonx import extract_all_objects, extract_json_object
+
+# 一个"像动作"的对象至少要有这些键之一
+_ACTION_KEYS = ["type", "action", "mark", "skill", "key", "x"]
 
 
 def parse_action(text: str) -> Action:
@@ -14,60 +16,36 @@ def parse_action(text: str) -> Action:
 
     支持两种格式：
     1. 纯 JSON：{"type": "click", "x": 100, "y": 200, ...}
-    2. 文本里内嵌 JSON（模型有时会加解释文字）
+    2. 文本里内嵌 JSON（模型有时会加解释文字），**允许嵌套**（args/params/position/to）
     """
-    text = text.strip()
+    data = extract_json_object(text, required_keys=["type", "action"])
+    if data is None:
+        data = extract_json_object(text, required_keys=_ACTION_KEYS)
+    if data is None:
+        raise GroundingError(f"无法从模型输出解析动作：{(text or '')[:200]}")
 
-    # 尝试直接解析整个文本为 JSON
-    try:
-        data = json.loads(text)
-        return _to_action(data)
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    # 尝试提取 JSON 对象
-    m = re.search(r"\{[^{}]*\}", text, re.DOTALL)
-    if m:
-        try:
-            data = json.loads(m.group(0))
-            return _to_action(data)
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-    raise GroundingError(f"无法从模型输出解析动作：{text[:200]}")
+    action = _to_action(data)
+    if not action.type:
+        # 以前这里会返回一个 type="" 的空动作，主循环拿着它走到执行器才炸，
+        # 错误信息（"未知动作类型"）跟真实原因（模型输出没解析对）完全对不上。
+        raise GroundingError(f"模型输出里没有动作类型：{(text or '')[:200]}")
+    return action
 
 
 def parse_actions(text: str) -> List[Action]:
     """解析可能包含多个动作的输出（JSON 数组或对象列表）。"""
-    text = text.strip()
-    # 数组
-    try:
-        data = json.loads(text)
-        if isinstance(data, list):
-            return [_to_action(d) for d in data]
-        if isinstance(data, dict):
-            return [_to_action(data)]
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    # 单个对象
-    try:
-        return [parse_action(text)]
-    except GroundingError:
-        pass
-
-    # 提取所有 JSON 对象
-    actions = []
-    for m in re.finditer(r"\{[^{}]*\}", text, re.DOTALL):
+    out: List[Action] = []
+    for data in extract_all_objects(text):
         try:
-            data = json.loads(m.group(0))
-            actions.append(_to_action(data))
-        except (json.JSONDecodeError, ValueError):
+            action = _to_action(data)
+        except (TypeError, ValueError):
             continue
-    if actions:
-        return actions
-
-    raise GroundingError(f"无法从模型输出解析动作：{text[:200]}")
+        if action.type:
+            out.append(action)
+    if out:
+        return out
+    # 没有任何带 type 的对象：交给 parse_action 给出统一报错（含原文）
+    return [parse_action(text)]
 
 
 def _to_action(data: Dict[str, Any]) -> Action:
@@ -86,7 +64,8 @@ def _to_action(data: Dict[str, Any]) -> Action:
         data.setdefault("y", data["coordinate"][1])
 
     # drag 的终点：兼容 x2/y2、to_x/to_y、以及 {"to": {"x":..,"y":..}}
-    endpoint = data.get("to") if isinstance(data.get("to"), dict) else {}
+    _to = data.get("to")
+    endpoint: Dict[str, Any] = _to if isinstance(_to, dict) else {}
     x2 = data.get("x2", data.get("to_x", endpoint.get("x")))
     y2 = data.get("y2", data.get("to_y", endpoint.get("y")))
 

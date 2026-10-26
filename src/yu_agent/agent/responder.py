@@ -6,6 +6,14 @@
 
 如果用户只是打招呼/闲聊/提问，则只回复文字，不调用 GUI agent。
 
+⚠️ 回复语言：**一律简体中文**
+------------------------------
+提示词默认是英文（`prompts.language: en`，指令遵循更稳），小模型很容易把回复也写成英文，
+用户看到的就是一句英文寒暄。这里三层保证：
+1. 系统提示里把「reply 必须简体中文」写成硬性要求 + 三个 few-shot；
+2. 返回前检测：整句没有任何汉字 → 追加一次极短的「译成中文」调用（只在异常时发生）；
+3. 最后兜底：仍拿不到中文就用现成的中文模板，绝不给用户丢一句英文。
+
 ⚠️ 这里有一个必须守住的边界
 ----------------------------
 本模块发给模型的请求**不带截图**（纯文本），所以模型对「你能看到屏幕吗」这类问题
@@ -17,10 +25,10 @@
 """
 from __future__ import annotations
 
-import json
 import re
 from typing import Any, Dict, Optional
 
+from ..common.jsonx import extract_json_object
 from ..common.logging import get_logger
 from ..models.base import VLMRequest
 
@@ -30,7 +38,17 @@ log = get_logger("yu_agent.responder")
 _INTENT_SYSTEM = """你是 Yu-Agent 的智能调度助手。你会收到用户的一句话，需要判断两件事：
 
 1. 这句话是否需要「操作电脑屏幕」来完成？
-2. 用友好、简洁的中文回复用户，说明你接下来要做什么（如果需要操作），或者直接回应（如果只是闲聊/打招呼/提问）。
+2. 用友好、简洁的**简体中文**回复用户，说明你接下来要做什么（如果需要操作），或者直接回应（如果只是闲聊/打招呼/提问）。
+
+【回复语言：硬性要求】
+- reply 字段**必须是简体中文**。即使你用英文思考、即使提示词/用户输入是英文，也要用中文回复。
+- 只有专有名词（应用名、文件名、菜单项、命令、链接）保留原文，例如「我来打开 Safari 搜索天气」。
+- 禁止用英文整句；不要写成中英混杂的英文句式。
+
+示例（注意 reply 全是中文）：
+用户：hello → {"needs_gui": false, "reply": "你好！我是 Yu-Agent，可以帮你操作电脑，需要我做什么？"}
+用户：open safari and search for weather → {"needs_gui": true, "reply": "好的，我先打开 Safari，再搜索天气。"}
+用户：你是谁 → {"needs_gui": false, "reply": "我是 Yu-Agent，一个能帮你在电脑上点击、输入、执行任务的助手。"}
 
 你必须只输出一个 JSON 对象，不要输出任何其他文字，不要用 markdown 代码块包裹，格式如下：
 {"needs_gui": true, "reply": "给用户的回复文字"}
@@ -42,6 +60,13 @@ _INTENT_SYSTEM = """你是 Yu-Agent 的智能调度助手。你会收到用户�
 - reply 要自然、口语化、简短（一般不超过 50 字），不要复述动作细节。
 - needs_gui 只能是 true 或 false 两个值。
 """
+
+# 兜底翻译用：只做一件事，避免小模型又自由发挥
+_TRANSLATE_SYSTEM = """把用户给的一句话翻译成简体中文，只输出译文本身：
+不要解释、不要引号、不要保留英文原句。专有名词（应用名/文件名/命令）可以保留原文。"""
+
+# 判断是否包含汉字（东亚汉字区，覆盖简体/繁体）
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
 # 判断是否包含「需要操作屏幕」的动作词（解析失败时的启发式兜底）
 _ACTION_HINTS = [
@@ -65,6 +90,14 @@ _NEGATIVE_REPLIES = (
     "cannot see", "can't see", "unable to see", "no access to your screen",
 )
 
+# 中文兜底模板（翻译也失败时用，宁可普通也别丢英文给用户）
+_FALLBACK_REPLY_RUN = "好的，我来帮你处理。"
+_FALLBACK_REPLY_CHAT = "你好！我是 Yu-Agent，可以帮你操作电脑，需要我做什么？"
+
+
+def has_chinese(text: str) -> bool:
+    """文本里是否含汉字。"""
+    return bool(_CJK_RE.search(text or ""))
 
 
 class Responder:
@@ -88,7 +121,7 @@ class Responder:
             json_mode=False,
         )
         resp = self.backend.chat(req)
-        text = resp.text.strip()
+        text = (resp.text or "").strip()
 
         # 解析 JSON
         data = self._parse(text)
@@ -96,7 +129,7 @@ class Responder:
             model_says = bool(data.get("needs_gui", True))
             reply = str(data.get("reply", "")).strip()
             if not reply:
-                reply = "好的，我来帮你处理。" if (model_says or forced) else "你好！"
+                reply = _FALLBACK_REPLY_RUN if (model_says or forced) else _FALLBACK_REPLY_CHAT
             needs_gui = model_says or forced
             if forced and not model_says:
                 log.warning(
@@ -107,15 +140,49 @@ class Responder:
             # 界面上会显示这句话，但实际马上要截屏执行，所以换成不矛盾的说法。
             if forced and any(x in reply.lower() for x in _NEGATIVE_REPLIES):
                 reply = "好的，我先截屏看一下当前界面。"
-            return {"needs_gui": needs_gui, "reply": reply}
+            return {"needs_gui": needs_gui, "reply": self._ensure_chinese(reply, needs_gui)}
 
         # 解析失败：把原始文本当作回复，用启发式判断是否需要 GUI
         if not text:
             # 模型完全无输出，保守地当作需要 GUI 并继续执行
-            return {"needs_gui": True, "reply": "好的，我来帮你处理。"}
+            return {"needs_gui": True, "reply": _FALLBACK_REPLY_RUN}
         reply = text[:200].strip()
         needs_gui = forced or self._guess_needs_gui(user_input, reply)
-        return {"needs_gui": needs_gui, "reply": reply}
+        return {"needs_gui": needs_gui, "reply": self._ensure_chinese(reply, needs_gui)}
+
+    # ------------------------------------------------------------------ #
+    # 回复语言兜底
+    # ------------------------------------------------------------------ #
+    def _ensure_chinese(self, reply: str, needs_gui: bool) -> str:
+        """确保给用户看的回复是中文。
+
+        只有「整句没有一个汉字」时才多花一次调用去译 —— 正常中文回复零开销。
+        """
+        if not reply or has_chinese(reply):
+            return reply
+        translated = self._translate(reply)
+        if translated:
+            return translated
+        # 翻译失败：用现成中文模板，绝不给用户丢英文
+        log.warning("回复无法转成中文，已用模板兜底（原文：%s）", reply[:60])
+        return _FALLBACK_REPLY_RUN if needs_gui else _FALLBACK_REPLY_CHAT
+
+    def _translate(self, text: str) -> str:
+        """把一句英文译成中文；失败返回空串。"""
+        try:
+            resp = self.backend.chat(
+                VLMRequest(
+                    system=_TRANSLATE_SYSTEM,
+                    prompt=text,
+                    temperature=0.0,
+                    max_tokens=300,
+                )
+            )
+            out = (resp.text or "").strip().strip('"').strip()
+            return out if has_chinese(out) else ""
+        except Exception as e:  # 翻译是锦上添花，失败不能影响主流程
+            log.warning("回复中文化失败（忽略）：%s", e)
+            return ""
 
     @staticmethod
     def _must_run_gui(user_input: str) -> bool:
@@ -138,17 +205,5 @@ class Responder:
 
     @staticmethod
     def _parse(text: str) -> Optional[Dict[str, Any]]:
-        text = text.strip()
-        # 剥离 markdown 代码块标记
-        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text).strip()
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-        m = re.search(r"\{[^{}]*\}", text, re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except json.JSONDecodeError:
-                pass
-        return None
+        """从模型输出里取 JSON（统一走 common/jsonx，支持嵌套与代码块包裹）。"""
+        return extract_json_object(text, required_keys=["needs_gui", "reply"])
