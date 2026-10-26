@@ -36,7 +36,7 @@ def get_screen_size() -> Screen:
     # 兜底：PIL 无法直接取屏幕尺寸，走平台 API
     if sys.platform == "darwin":
         try:
-            from Quartz import CGDisplayBounds, CGMainDisplayID  # type: ignore
+            from Quartz import CGDisplayBounds, CGMainDisplayID
 
             rect = CGDisplayBounds(CGMainDisplayID())
             return Screen(int(rect.size.width), int(rect.size.height))
@@ -79,7 +79,7 @@ def _capture_macos():
     而 pyautogui 的坐标是逻辑像素。这里按缩放因子缩回逻辑像素，保证坐标系一致。
     """
     try:
-        import Quartz  # type: ignore
+        import Quartz
         from PIL import Image as _Image
 
         main_id = Quartz.CGMainDisplayID()
@@ -107,7 +107,7 @@ def _capture_macos():
 
         # 若物理像素尺寸 != 逻辑像素尺寸（Retina 2x），缩回逻辑像素
         if (width, height) != (logical_w, logical_h):
-            img = img.resize((logical_w, logical_h), _Image.LANCZOS)
+            img = img.resize((logical_w, logical_h), _Image.Resampling.LANCZOS)
         return img
     except Exception:
         return None

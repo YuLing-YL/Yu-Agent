@@ -21,8 +21,8 @@ from PySide6.QtWidgets import (
     QComboBox,
     QGroupBox,
     QHBoxLayout,
-    QLabel,
     QInputDialog,
+    QLabel,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -347,7 +347,7 @@ class MainWindow(QMainWindow):
         )
         self._worker.event.connect(self._on_event)
         self._worker.reply.connect(self._on_reply)
-        self._worker.finished.connect(self._on_finished)
+        self._worker.completed.connect(self._on_finished)
         # 人机往返：危险动作确认 / agent 提问（worker 线程阻塞等这两个弹窗）
         self._worker.approval_needed.connect(self._on_approval_needed)
         self._worker.question_asked.connect(self._on_question_asked)
@@ -686,13 +686,14 @@ class MainWindow(QMainWindow):
             self.activateWindow()
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        running = bool(self._worker and self._worker.isRunning())
+        worker = self._worker
+        running = worker is not None and worker.isRunning()
 
-        if running and not self._quitting:
+        if running and worker is not None and not self._quitting:
             self._quitting = True
-            self._worker.stop()
+            worker.stop()
             try:
-                self._worker.finished.connect(self._force_quit)
+                worker.finished.connect(self._force_quit)
             except Exception:
                 pass
             self._quit_watchdog.start(15000)

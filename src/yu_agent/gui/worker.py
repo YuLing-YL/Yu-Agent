@@ -7,24 +7,27 @@ worker 线程阻塞等待，主线程弹窗，回答通过 `provide_*` 回填。
 from __future__ import annotations
 
 import threading
-from typing import Any, List, Optional
+from typing import List, Optional
 
 from PySide6.QtCore import QThread, Signal
 
 from ..agent.control import RunControl
 from ..agent.responder import Responder
 from ..agent_facade import YuAgent
-from ..settings import ModelConfig, get_settings
 from ..safety.risk import Risk
+from ..settings import ModelConfig
 
 
 class AgentWorker(QThread):
     """后台线程：意图识别 → （可选）GUI agent 执行。"""
 
     # 信号
+    # 注意：这里**不能**把信号命名为 finished —— QThread 自带一个无参的 finished
+    # 信号，在子类里用 Signal(dict) 覆盖会让基类那个信号彻底消失（Qt 内部靠它
+    # 做清理），所以本类的「任务结束」信号叫 completed。
     event = Signal(dict)          # 过程事件
     reply = Signal(str)           # AI 给用户的回复文字
-    finished = Signal(dict)       # 最终 state dict
+    completed = Signal(dict)      # 最终 state dict
     approval_needed = Signal(dict)  # 危险动作需要确认
     question_asked = Signal(dict)   # agent 想向用户提问
 
@@ -106,7 +109,7 @@ class AgentWorker(QThread):
 
             if not needs_gui:
                 # 纯对话，不调用 agent
-                self.finished.emit(
+                self.completed.emit(
                     {
                         "success": True,
                         "steps": 0,
@@ -121,11 +124,11 @@ class AgentWorker(QThread):
             state = self._agent.run(self.task)
             out = state.to_dict()
             out["reply"] = reply_text
-            self.finished.emit(out)
+            self.completed.emit(out)
 
         except Exception as e:
             self.event.emit({"type": "error", "message": str(e)})
-            self.finished.emit(
+            self.completed.emit(
                 {"success": False, "reason": str(e), "steps": 0}
             )
         finally:

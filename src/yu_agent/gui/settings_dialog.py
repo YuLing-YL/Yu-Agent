@@ -1,7 +1,6 @@
 """设置对话框：API 配置（base_url / api_key / 模型名）等。"""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
     QFormLayout,
@@ -14,7 +13,6 @@ from PySide6.QtWidgets import (
 )
 
 from ..settings import (
-    get_settings,
     load_user_config,
     reload_settings,
     save_user_config,
